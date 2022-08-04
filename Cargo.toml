@@ -1,0 +1,10 @@
+[package]
+name = "csnmp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+from-to-repr = { version = "0.1" }
+simple_asn1 = { version = "0.6" }
+tokio = { version = "1.20", features = ["net", "time"] }
+tracing = { version = "0.1", optional = true }
