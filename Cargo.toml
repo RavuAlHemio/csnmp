@@ -2,6 +2,11 @@
 name = "csnmp"
 version = "0.1.0"
 edition = "2021"
+license = "CC0-1.0"
+description = "Community-based async (Tokio) SNMP client library"
+repository = "https://github.com/RavuAlHemio/csnmp"
+readme = "README.md"
+keywords = ["snmp", "async", "tokio"]
 
 [dependencies]
 from-to-repr = { version = "0.1" }
