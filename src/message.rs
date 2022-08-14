@@ -449,6 +449,20 @@ pub enum Snmp2cPdu {
     InformRequest(InnerPdu),
     SnmpV2Trap(InnerPdu),
 }
+impl Snmp2cPdu {
+    /// Returns the request ID from the inner SNMP2c Protocol Data Unit (PDU).
+    pub fn request_id(&self) -> i32 {
+        match self {
+            Self::GetRequest(p) => p.request_id,
+            Self::GetNextRequest(p) => p.request_id,
+            Self::GetBulkRequest(p) => p.request_id,
+            Self::Response(p) => p.request_id,
+            Self::SetRequest(p) => p.request_id,
+            Self::InformRequest(p) => p.request_id,
+            Self::SnmpV2Trap(p) => p.request_id,
+        }
+    }
+}
 impl FromASN1 for Snmp2cPdu {
     type Error = SnmpMessageError;
 
