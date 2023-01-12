@@ -122,6 +122,14 @@ impl Snmp2cClient {
         self.low_level_client.get(oid, request_id, &options).await
     }
 
+    /// Obtains the value for multiple specific SNMP objects.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier>>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+        let options = self.get_operation_options();
+        let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.low_level_client.get_multiple(oids, request_id, &options).await
+    }
+
     /// Obtains the value for the next object in the tree relative to the given OID. This is a
     /// low-level operation, used as a building block for [`walk`].
     #[cfg_attr(feature = "tracing", instrument)]
@@ -536,6 +544,56 @@ impl LowLevelSnmp2cClient {
         };
 
         Ok(value)
+    }
+
+    /// Obtains values for multiple specified SNMP objects.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier>>(
+        &self,
+        oids: I,
+        request_id: i32,
+        options: &OperationOptions,
+    ) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+        // prepare Get message
+        let variable_bindings: Vec<VariableBinding> = oids
+            .into_iter()
+            .map(|oid| VariableBinding {
+                name: oid,
+                value: BindingValue::Unspecified,
+            })
+            .collect();
+        let binding_count = variable_bindings.len();
+        let get_message = Snmp2cMessage {
+            version: VERSION_VALUE,
+            community: options.community.clone(),
+            pdu: Snmp2cPdu::GetRequest(InnerPdu {
+                request_id,
+                error_status: ErrorStatus::NoError,
+                error_index: 0,
+                variable_bindings,
+            }),
+        };
+        let pdu = self.send_receive(
+            &get_message,
+            options.target,
+            options.send_timeout,
+            options.receive_timeout,
+        ).await?;
+
+        if pdu.variable_bindings.len() != binding_count {
+            return Err(SnmpClientError::BindingCount { expected: binding_count, obtained: pdu.variable_bindings });
+        }
+
+        let mut results = BTreeMap::new();
+        for binding in pdu.variable_bindings {
+            let value = match binding.value {
+                BindingValue::Value(v) => v,
+                _ => return Err(SnmpClientError::FailedBinding { binding }),
+            };
+            results.insert(binding.name, value);
+        }
+
+        Ok(results)
     }
 
     /// Obtains the value for the next object in the tree relative to the given OID. This is a
