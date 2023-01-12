@@ -3,7 +3,7 @@
 /// Unfortunately, dotted sequences are not supported due to the lexer/parser's interpretation of
 /// literals like `1.1` as floating-point numbers instead of dotted integer sequences.
 #[macro_export]
-macro_rules! oid {
+macro_rules! make_oid {
     () => {
         $crate::oid::ObjectIdentifier::new(0, [0u32; $crate::oid::MAX_SUB_IDENTIFIER_COUNT])
     };
@@ -11,7 +11,7 @@ macro_rules! oid {
         {
             let mut arcs = [0u32; $crate::oid::MAX_SUB_IDENTIFIER_COUNT];
             let mut length = 0;
-            oid!(@store_numbers, arcs, length, $firstnum $(, $nextnums)*);
+            make_oid!(@store_numbers, arcs, length, $firstnum $(, $nextnums)*);
             $crate::oid::ObjectIdentifier::new(length, arcs)
         }
     };
@@ -22,24 +22,24 @@ macro_rules! oid {
     (@store_numbers, $arcs:expr, $length:expr, $firstnum:literal $(, $nextnums:literal)*) => {
         $arcs[$length] = $firstnum;
         $length += 1;
-        oid!(@store_numbers, $arcs, $length $(, $nextnums)*);
+        make_oid!(@store_numbers, $arcs, $length $(, $nextnums)*);
     };
 }
 
 
 #[cfg(test)]
 mod tests {
-    use crate::{ObjectIdentifier, oid};
+    use crate::{ObjectIdentifier, make_oid};
 
     #[test]
     fn test_create_empty_oid() {
-        const EMPTY_OID: ObjectIdentifier = oid!();
+        const EMPTY_OID: ObjectIdentifier = make_oid!();
         assert_eq!(EMPTY_OID, ObjectIdentifier::new(0, [0u32; 128]));
     }
 
     #[test]
     fn test_two_arc_oid() {
-        const SHORT_OID: ObjectIdentifier = oid!(1,3);
+        const SHORT_OID: ObjectIdentifier = make_oid!(1,3);
         let mut arcs = [0u32; 128];
         arcs[0] = 1;
         arcs[1] = 3;
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn test_8_arc_oid() {
-        const EIGHT_ARC_OID: ObjectIdentifier = oid!(1,3,6,1,2,1,2,2);
+        const EIGHT_ARC_OID: ObjectIdentifier = make_oid!(1,3,6,1,2,1,2,2);
         let mut arcs = [0u32; 128];
         arcs[0] = 1;
         arcs[1] = 3;
