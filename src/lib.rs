@@ -1,4 +1,8 @@
+#![recursion_limit = "256"]
+
+
 pub mod client;
+mod macros;
 pub mod message;
 pub mod oid;
 
