@@ -124,7 +124,7 @@ impl Snmp2cClient {
 
     /// Obtains the value for multiple specific SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier>>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.get_multiple(oids, request_id, &options).await
@@ -548,7 +548,7 @@ impl LowLevelSnmp2cClient {
 
     /// Obtains values for multiple specified SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier>>(
+    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(
         &self,
         oids: I,
         request_id: i32,
