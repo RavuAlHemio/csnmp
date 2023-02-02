@@ -184,7 +184,7 @@ impl Snmp2cClient {
 
     /// Walks an OID tree from the given OID, collecting and returning the results.
     ///
-    /// This is a high-level operation using [`get`] and [`get_bulk`] under the hood.
+    /// This is a high-level operation using [`get_bulk`] (and, optionally, [`get`]) under the hood.
     ///
     /// You can generally set `non_repeaters` to 0. Tune `max_repetitions` to your liking; 10 is a
     /// good starting value.
@@ -823,7 +823,7 @@ impl LowLevelSnmp2cClient {
 
     /// Walks an OID tree from the given OID, collecting and returning the results.
     ///
-    /// This is a high-level operation using [`get`] and [`get_bulk`] under the hood.
+    /// This is a high-level operation using [`get_bulk`] (and, optionally, [`get`]) under the hood.
     ///
     /// You can generally set `non_repeaters` to 0. Tune `max_repetitions` to your liking; 10 is a
     /// good starting value.
@@ -842,24 +842,6 @@ impl LowLevelSnmp2cClient {
         options: &OperationOptions,
     ) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         let mut ret = BTreeMap::new();
-
-        // start with get to ensure we get top_oid
-        // (because get_bulk starts at the OID *after* it)
-        match self.get(top_oid, *request_id, options).await {
-            Ok(value) => {
-                ret.insert(top_oid, value);
-            },
-            Err(SnmpClientError::FailedBinding { binding }) => {
-                if let BindingValue::NoSuchInstance = binding.value {
-                    // don't mind this, there might be something after it
-                } else if let BindingValue::NoSuchObject = binding.value {
-                    // don't mind this either, there might be something after it
-                } else {
-                    return Err(SnmpClientError::FailedBinding { binding });
-                }
-            },
-            Err(e) => return Err(e),
-        }
 
         // keep calling get_bulk until one of the OIDs is no longer under top_oid
         let mut cur_oid = top_oid;
@@ -884,6 +866,31 @@ impl LowLevelSnmp2cClient {
                     if get_bulk_result.end_of_mib_view {
                         // there will be no more values
                         break;
+                    }
+                },
+                Err(e) => return Err(e),
+            }
+        }
+
+        if ret.len() == 0 {
+            // well that's disappointing
+            // maybe it is directly a value?
+
+            // note: we *could* call get() before calling get_bulk(), but devices are probably more
+            // used to this (Net-SNMP's) behavior and I have encountered SNMP agents like the one
+            // running on Cisco NX-OS 7.0(3)I2(4) which become confused if we call get() first
+
+            match self.get(top_oid, *request_id, options).await {
+                Ok(value) => {
+                    ret.insert(top_oid, value);
+                },
+                Err(SnmpClientError::FailedBinding { binding }) => {
+                    if let BindingValue::NoSuchInstance = binding.value {
+                        // guess there is really no such value; just return the empty map
+                    } else if let BindingValue::NoSuchObject = binding.value {
+                        // same
+                    } else {
+                        return Err(SnmpClientError::FailedBinding { binding });
                     }
                 },
                 Err(e) => return Err(e),
