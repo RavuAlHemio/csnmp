@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -417,7 +417,7 @@ impl LowLevelSnmp2cClient {
                     return Err(SnmpClientError::TimedOut);
                 }
             }
-            if sender != target {
+            if !socket_addrs_equal(sender, target) {
                 // received an answer from the wrong device
                 // TODO: pass traps or INFORMs up the chain?
                 debug!("message expected from {}, not {}; trying again", target, sender);
@@ -891,5 +891,55 @@ impl LowLevelSnmp2cClient {
         }
 
         Ok(ret)
+    }
+}
+
+
+/// Unmaps IPv4-mapped IPv6 addresses into their pure-IPv4 equivalents.
+///
+/// Returns any other IP addresses unchanged.
+fn unmap_ipv6_ipv4_addr(addr: IpAddr) -> IpAddr {
+    if let IpAddr::V6(v6_addr) = addr {
+        if let Some(unmapped_addr) = v6_addr.to_ipv4_mapped() {
+            return IpAddr::V4(unmapped_addr);
+        }
+    }
+    addr
+}
+
+
+/// Equality check for socket addresses that takes IPv4-mapped IPv6 addresses into account.
+///
+/// Apart from strict equality, this function considers socket addresses equal if they have the same
+/// port and one of the IP addresses is the IPv4-mapped IPv6 variant of the other IP address. For
+/// example, `127.0.0.1:161` and `[::ffff:127.0.0.1]:161` (`[::ffff:7f00:1]:161`) are considered
+/// equal.
+fn socket_addrs_equal(one: SocketAddr, other: SocketAddr) -> bool {
+    // short-circuit full equality
+    if one == other {
+        return true;
+    }
+
+    let one_unmapped = SocketAddr::new(unmap_ipv6_ipv4_addr(one.ip()), one.port());
+    let other_unmapped = SocketAddr::new(unmap_ipv6_ipv4_addr(other.ip()), one.port());
+
+    one_unmapped == other_unmapped
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::socket_addrs_equal;
+
+    #[test]
+    fn test_socket_addrs_equal() {
+        assert!(socket_addrs_equal("127.0.0.1:161".parse().unwrap(), "127.0.0.1:161".parse().unwrap()));
+        assert!(socket_addrs_equal("[::ffff:127.0.0.1]:161".parse().unwrap(), "[::ffff:127.0.0.1]:161".parse().unwrap()));
+        assert!(socket_addrs_equal("[::ffff:127.0.0.1]:161".parse().unwrap(), "127.0.0.1:161".parse().unwrap()));
+        assert!(socket_addrs_equal("127.0.0.1:161".parse().unwrap(), "[::ffff:127.0.0.1]:161".parse().unwrap()));
+
+        // numerically equivalent IP address, not IPv4-mapped IP address
+        assert!(!socket_addrs_equal("127.0.0.1:161".parse().unwrap(), "[::7f00:1]:161".parse().unwrap()));
+        assert!(!socket_addrs_equal("[::7f00:1]:161".parse().unwrap(), "127.0.0.1:161".parse().unwrap()));
     }
 }
