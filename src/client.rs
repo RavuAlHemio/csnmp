@@ -430,6 +430,8 @@ impl LowLevelSnmp2cClient {
             let message = Snmp2cMessage::try_from_bytes(&buf)
                 .map_err(|message_error| SnmpClientError::DecodingIncoming { message_error })?;
 
+            debug!("message from {} is {:?}", sender, message);
+
             if message.pdu.request_id() != sent_request_id {
                 // response to the wrong message
                 debug!("response to SNMP request with ID {}, not {}; trying again", message.pdu.request_id(), sent_request_id);
@@ -846,8 +848,9 @@ impl LowLevelSnmp2cClient {
         // keep calling get_bulk until one of the OIDs is no longer under top_oid
         let mut cur_oid = top_oid;
         loop {
+            let get_bulk_result = self.get_bulk(cur_oid, non_repeaters, max_repetitions, *request_id, options).await;
             *request_id += 1;
-            match self.get_bulk(cur_oid, non_repeaters, max_repetitions, *request_id, options).await {
+            match get_bulk_result {
                 Ok(get_bulk_result) => {
                     let mut out_of_tree = false;
                     for (oid, value) in get_bulk_result.values {
@@ -880,7 +883,9 @@ impl LowLevelSnmp2cClient {
             // used to this (Net-SNMP's) behavior and I have encountered SNMP agents like the one
             // running on Cisco NX-OS 7.0(3)I2(4) which become confused if we call get() first
 
-            match self.get(top_oid, *request_id, options).await {
+            let get_result = self.get(top_oid, *request_id, options).await;
+            *request_id += 1;
+            match get_result {
                 Ok(value) => {
                     ret.insert(top_oid, value);
                 },
