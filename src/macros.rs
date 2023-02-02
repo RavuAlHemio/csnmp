@@ -27,6 +27,21 @@ macro_rules! make_oid {
 }
 
 
+#[cfg(feature = "tracing")]
+#[macro_export]
+macro_rules! debug {
+    ($first_expr:expr $(, $other_expr:expr)* $(,)?) => {
+        ::tracing::debug!($first_expr $(, $other_expr)*);
+    };
+}
+
+#[cfg(not(feature = "tracing"))]
+#[macro_export]
+macro_rules! debug {
+    ($first_expr:expr $(, $other_expr:expr)* $(,)?) => {};
+}
+
+
 #[cfg(test)]
 mod tests {
     use crate::{ObjectIdentifier, make_oid};

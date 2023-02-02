@@ -13,6 +13,7 @@ use tokio::net::UdpSocket;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
+use crate::debug;
 use crate::message::{
     BindingValue, BulkPdu, ErrorStatus, InnerPdu, ObjectValue, Snmp2cMessage, Snmp2cPdu,
     SnmpMessageError, VariableBinding, VERSION_VALUE,
@@ -371,6 +372,8 @@ impl LowLevelSnmp2cClient {
         let bytes = outgoing.to_bytes()
             .map_err(|message_error| SnmpClientError::EncodingOutgoing { message_error })?;
 
+        debug!("sending {:?} to {} with a timeout of {:?}", bytes, target, timeout);
+
         // send it
         let bytes_sent = maybe_timeout(timeout, self.socket.send_to(&bytes, target)).await?
             .map_err(|io_error| SnmpClientError::Sending { io_error })?;
@@ -403,6 +406,7 @@ impl LowLevelSnmp2cClient {
             let start_instant = Instant::now();
             let (bytes_received, sender) = maybe_timeout(receive_timeout_mut, self.socket.recv_from(&mut buf)).await?
                 .map_err(|io_error| SnmpClientError::Receiving { io_error })?;
+            debug!("received {:?} from {}", &buf[0..bytes_received], sender);
             let end_instant = Instant::now();
             if let Some(rtm) = &receive_timeout_mut {
                 // subtract the elapsed time
@@ -416,6 +420,7 @@ impl LowLevelSnmp2cClient {
             if sender != target {
                 // received an answer from the wrong device
                 // TODO: pass traps or INFORMs up the chain?
+                debug!("message expected from {}, not {}; trying again", target, sender);
                 continue;
             }
 
@@ -427,6 +432,7 @@ impl LowLevelSnmp2cClient {
 
             if message.pdu.request_id() != sent_request_id {
                 // response to the wrong message
+                debug!("response to SNMP request with ID {}, not {}; trying again", message.pdu.request_id(), sent_request_id);
                 continue;
             }
 
