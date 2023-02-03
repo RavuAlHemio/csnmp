@@ -9,6 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+use derivative::Derivative;
 use tokio::net::UdpSocket;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -38,10 +39,12 @@ async fn maybe_timeout<T: Future>(timeout: Option<Duration>, future: T) -> Resul
 
 
 /// A SNMP2c client.
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Snmp2cClient {
     low_level_client: LowLevelSnmp2cClient,
     target: SocketAddr,
+    #[derivative(Debug="ignore")]
     community: Vec<u8>,
     request_id: AtomicI32,
     timeout: Option<Duration>,
@@ -313,7 +316,8 @@ pub struct GetBulkResult {
 
 
 /// Options governing SNMP2c operations.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Derivative, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derivative(Debug)]
 pub struct OperationOptions {
     /// The IP address and port of the device with which the client is communicating.
     pub target: SocketAddr,
@@ -325,6 +329,7 @@ pub struct OperationOptions {
     pub receive_timeout: Option<Duration>,
 
     /// The community string used for SNMP2c authentication.
+    #[derivative(Debug="ignore")]
     pub community: Vec<u8>,
 }
 

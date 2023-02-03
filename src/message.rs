@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::net::Ipv4Addr;
 
+use derivative::Derivative;
 use from_to_repr::FromToRepr;
 use simple_asn1::{
     ASN1Block, ASN1Class, ASN1DecodeErr, ASN1EncodeErr, BigInt, BigUint, FromASN1, from_der, OID,
@@ -381,9 +382,11 @@ impl Asn1BlockExtensions for ASN1Block {
 
 
 // RFC1901, section 3.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Derivative, Eq, Hash, PartialEq)]
+#[derivative(Debug)]
 pub struct Snmp2cMessage {
     pub version: i64,
+    #[derivative(Debug="ignore")]
     pub community: Vec<u8>,
     pub pdu: Snmp2cPdu,
 }
