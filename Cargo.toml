@@ -1,6 +1,6 @@
 [package]
 name = "csnmp"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "CC0-1.0"
 description = "Community-based async (Tokio) SNMP client library"
