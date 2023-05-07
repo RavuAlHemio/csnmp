@@ -300,6 +300,25 @@ impl fmt::Display for SnmpClientError {
     }
 }
 impl std::error::Error for SnmpClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SnmpClientError::CreatingSocket { io_error, .. } => Some(io_error),
+            SnmpClientError::Connecting { io_error, .. } => Some(io_error),
+            SnmpClientError::EncodingOutgoing { message_error, .. } => Some(message_error),
+            SnmpClientError::Sending { io_error, .. } => Some(io_error),
+            SnmpClientError::ShortSend { .. } => None,
+            SnmpClientError::Receiving { io_error, .. } => Some(io_error),
+            SnmpClientError::DecodingIncoming { message_error, .. } => Some(message_error),
+            SnmpClientError::InvalidPdu { .. } => None,
+            SnmpClientError::BindingCount { .. } => None,
+            SnmpClientError::UnexpectedValue { .. } => None,
+            SnmpClientError::PrecedingValue { .. } => None,
+            SnmpClientError::NonIncreasingValue { .. } => None,
+            SnmpClientError::DuplicateValue { .. } => None,
+            SnmpClientError::FailedBinding { .. } => None,
+            SnmpClientError::TimedOut => None,
+        }
+    }
 }
 
 
