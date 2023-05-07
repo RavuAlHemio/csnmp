@@ -431,11 +431,11 @@ impl ToASN1 for Snmp2cMessage {
     type Error = SnmpMessageError;
 
     fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::new();
+        let mut pdu_asn1 = self.pdu.to_asn1()?;
+        let mut ret = Vec::with_capacity(2 + pdu_asn1.len());
+
         ret.push(ASN1Block::from_i64(self.version));
         ret.push(ASN1Block::from_bytes(&self.community));
-
-        let mut pdu_asn1 = self.pdu.to_asn1()?;
         ret.append(&mut pdu_asn1);
 
         Ok(vec![ASN1Block::Sequence(0, ret)])
@@ -586,8 +586,9 @@ impl FromASN1 for InnerPdu {
             .map_err(|_| SnmpMessageError::EnumRange { enum_name: "ErrorStatus", obtained: seq[1].clone() })?;
         let error_index = seq[2].as_u32()?;
 
-        let mut variable_bindings = Vec::new();
-        for block in seq[3].as_sequence()? {
+        let bindings_sequence = seq[3].as_sequence()?;
+        let mut variable_bindings = Vec::with_capacity(bindings_sequence.len());
+        for block in bindings_sequence {
             let (binding, _rest) = VariableBinding::from_asn1(&[block.clone()])?;
             variable_bindings.push(binding);
         }
@@ -605,7 +606,7 @@ impl ToASN1 for InnerPdu {
     type Error = SnmpMessageError;
 
     fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::new();
+        let mut ret = Vec::with_capacity(4);
         ret.push(ASN1Block::from_i32(self.request_id));
         ret.push(ASN1Block::from_u8(self.error_status.into()));
         ret.push(ASN1Block::from_u32(self.error_index));
@@ -640,8 +641,9 @@ impl FromASN1 for BulkPdu {
         let non_repeaters = seq[1].as_u32()?;
         let max_repetitions = seq[2].as_u32()?;
 
-        let mut variable_bindings = Vec::new();
-        for block in seq[3].as_sequence()? {
+        let bindings_sequence = seq[3].as_sequence()?;
+        let mut variable_bindings = Vec::with_capacity(bindings_sequence.len());
+        for block in bindings_sequence {
             let (binding, _rest) = VariableBinding::from_asn1(&[block.clone()])?;
             variable_bindings.push(binding);
         }
@@ -659,7 +661,7 @@ impl ToASN1 for BulkPdu {
     type Error = SnmpMessageError;
 
     fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::new();
+        let mut ret = Vec::with_capacity(4);
         ret.push(ASN1Block::from_i32(self.request_id));
         ret.push(ASN1Block::from_u32(self.non_repeaters));
         ret.push(ASN1Block::from_u32(self.max_repetitions));
@@ -708,7 +710,8 @@ impl ToASN1 for VariableBinding {
     type Error = SnmpMessageError;
 
     fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::new();
+        let mut val_vec = self.value.to_asn1()?;
+        let mut ret = Vec::with_capacity(1 + val_vec.len());
 
         let name_asn1: OID = (&self.name).try_into()
             .map_err(|error| SnmpMessageError::OidEncode {
@@ -717,7 +720,6 @@ impl ToASN1 for VariableBinding {
             })?;
 
         ret.push(ASN1Block::ObjectIdentifier(0, name_asn1));
-        let mut val_vec = self.value.to_asn1()?;
         ret.append(&mut val_vec);
 
         let inner_pdu = ASN1Block::Sequence(0, ret);
@@ -785,14 +787,9 @@ impl ToASN1 for BindingValue {
     type Error = SnmpMessageError;
 
     fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::new();
-
         match self {
-            Self::Unspecified => ret.push(ASN1Block::Null(0)),
-            Self::Value(val) => {
-                let mut val_asn1 = val.to_asn1()?;
-                ret.append(&mut val_asn1);
-            },
+            Self::Unspecified => Ok(vec![ASN1Block::Null(0)]),
+            Self::Value(val) => val.to_asn1(),
             Self::NoSuchObject|Self::NoSuchInstance|Self::EndOfMibView => {
                 let tag: u8 = match self {
                     Self::NoSuchObject => 0,
@@ -800,11 +797,9 @@ impl ToASN1 for BindingValue {
                     Self::EndOfMibView => 2,
                     _ => unreachable!(),
                 };
-                ret.push(ASN1Block::Unknown(ASN1Class::ContextSpecific, true, 0, BigUint::from(tag), Vec::new()));
+                Ok(vec![ASN1Block::Unknown(ASN1Class::ContextSpecific, true, 0, BigUint::from(tag), Vec::new())])
             },
         }
-
-        Ok(ret)
     }
 }
 
@@ -1027,7 +1022,7 @@ impl ToASN1 for ObjectValue {
     type Error = SnmpMessageError;
 
     fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::new();
+        let mut ret = Vec::with_capacity(1);
 
         match self {
             Self::Integer(i) => ret.push(ASN1Block::from_i32(*i)),
