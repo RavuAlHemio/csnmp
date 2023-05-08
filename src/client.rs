@@ -16,8 +16,8 @@ use tracing::instrument;
 
 use crate::debug;
 use crate::message::{
-    BindingValue, BulkPdu, ErrorStatus, InnerPdu, ObjectValue, Snmp2cMessage, Snmp2cPdu,
-    SnmpMessageError, VariableBinding, VERSION_VALUE,
+    Asn1BerCodable, BindingValue, BulkPdu, ErrorStatus, InnerPdu, ObjectValue, Snmp2cMessage,
+    Snmp2cPdu, SnmpMessageError, VariableBinding, VERSION_VALUE,
 };
 use crate::oid::ObjectIdentifier;
 
@@ -31,7 +31,7 @@ use crate::oid::ObjectIdentifier;
 async fn maybe_timeout<T: Future>(timeout: Option<Duration>, future: T) -> Result<T::Output, SnmpClientError> {
     if let Some(to) = timeout {
         tokio::time::timeout(to, future).await
-            .map_err(|_| SnmpClientError::TimedOut)
+            .map_err(|_| SnmpClientError::TimedOut {})
     } else {
         Ok(future.await)
     }
@@ -216,52 +216,68 @@ impl Snmp2cClient {
 
 /// An error that can occur during SNMP communication.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SnmpClientError {
     /// An error occurred while creating the socket.
+    #[non_exhaustive]
     CreatingSocket { io_error: io::Error },
 
     /// An error occurred while connecting the socket to a specific server.
+    #[non_exhaustive]
     Connecting { io_error: io::Error },
 
     /// An error occurred while encoding the outgoing message.
+    #[non_exhaustive]
     EncodingOutgoing { message_error: SnmpMessageError },
 
     /// An error occurred while sending a message.
+    #[non_exhaustive]
     Sending { io_error: io::Error },
 
     /// The message was truncated while being sent.
+    #[non_exhaustive]
     ShortSend { expected: usize, sent: usize },
 
     /// An error occurred while receiving a message.
+    #[non_exhaustive]
     Receiving { io_error: io::Error },
 
     /// An error occurred while decoding the incoming message.
+    #[non_exhaustive]
     DecodingIncoming { message_error: SnmpMessageError },
 
     /// The response contains an invalid Protocol Data Unit.
+    #[non_exhaustive]
     InvalidPdu { pdu: Snmp2cPdu },
 
     /// An unexpected number of variable bindings has been received.
+    #[non_exhaustive]
     BindingCount { expected: usize, obtained: Vec<VariableBinding> },
 
     /// An unexpected value has been obtained in a `Get` operation.
+    #[non_exhaustive]
     UnexpectedValue { expected: ObjectIdentifier, obtained: Vec<VariableBinding> },
 
     /// A value preceding the provided previous OID has been obtained in a `GetNext` or `GetBulk`
     /// operation.
+    #[non_exhaustive]
     PrecedingValue { previous_oid: ObjectIdentifier, obtained: Vec<VariableBinding> },
 
     /// Multiple values have been obtained and they are not in ascending order by OID.
+    #[non_exhaustive]
     NonIncreasingValue { previous_oid: ObjectIdentifier, next_oid: ObjectIdentifier, obtained: Vec<VariableBinding> },
 
     /// More than one value has been obtained for the same OID in a `GetBulk` operation.
+    #[non_exhaustive]
     DuplicateValue { oid: ObjectIdentifier, obtained: Vec<VariableBinding> },
 
     /// A variable binding value signifying an error has been obtained.
+    #[non_exhaustive]
     FailedBinding { binding: VariableBinding },
 
     /// The operation took longer than allowed by the timeout value.
-    TimedOut,
+    #[non_exhaustive]
+    TimedOut {},
 }
 impl fmt::Display for SnmpClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -294,7 +310,7 @@ impl fmt::Display for SnmpClientError {
                 => write!(f, "multiple values obtained for {}: {:?}", oid, obtained),
             Self::FailedBinding { binding }
                 => write!(f, "failed binding encountered: {:?}", binding),
-            Self::TimedOut
+            Self::TimedOut {}
                 => write!(f, "operation timed out"),
         }
     }
@@ -302,21 +318,21 @@ impl fmt::Display for SnmpClientError {
 impl std::error::Error for SnmpClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SnmpClientError::CreatingSocket { io_error, .. } => Some(io_error),
-            SnmpClientError::Connecting { io_error, .. } => Some(io_error),
-            SnmpClientError::EncodingOutgoing { message_error, .. } => Some(message_error),
-            SnmpClientError::Sending { io_error, .. } => Some(io_error),
-            SnmpClientError::ShortSend { .. } => None,
-            SnmpClientError::Receiving { io_error, .. } => Some(io_error),
-            SnmpClientError::DecodingIncoming { message_error, .. } => Some(message_error),
-            SnmpClientError::InvalidPdu { .. } => None,
-            SnmpClientError::BindingCount { .. } => None,
-            SnmpClientError::UnexpectedValue { .. } => None,
-            SnmpClientError::PrecedingValue { .. } => None,
-            SnmpClientError::NonIncreasingValue { .. } => None,
-            SnmpClientError::DuplicateValue { .. } => None,
-            SnmpClientError::FailedBinding { .. } => None,
-            SnmpClientError::TimedOut => None,
+            Self::CreatingSocket { io_error, .. } => Some(io_error),
+            Self::Connecting { io_error, .. } => Some(io_error),
+            Self::EncodingOutgoing { message_error, .. } => Some(message_error),
+            Self::Sending { io_error, .. } => Some(io_error),
+            Self::ShortSend { .. } => None,
+            Self::Receiving { io_error, .. } => Some(io_error),
+            Self::DecodingIncoming { message_error, .. } => Some(message_error),
+            Self::InvalidPdu { .. } => None,
+            Self::BindingCount { .. } => None,
+            Self::UnexpectedValue { .. } => None,
+            Self::PrecedingValue { .. } => None,
+            Self::NonIncreasingValue { .. } => None,
+            Self::DuplicateValue { .. } => None,
+            Self::FailedBinding { .. } => None,
+            Self::TimedOut {} => None,
         }
     }
 }
@@ -424,13 +440,17 @@ impl LowLevelSnmp2cClient {
         self.send(outgoing, target, send_timeout).await?;
 
         // receive the response
-        let mut buf = vec![0u8; 9000];
+        let mut buf = Vec::with_capacity(9000);
         let mut receive_timeout_mut = receive_timeout.clone();
         let message = loop {
+            buf.clear();
+            buf.extend(std::iter::repeat(0).take(9000));
+
             let start_instant = Instant::now();
             let (bytes_received, sender) = maybe_timeout(receive_timeout_mut, self.socket.recv_from(&mut buf)).await?
                 .map_err(|io_error| SnmpClientError::Receiving { io_error })?;
-            debug!("received {:?} from {}", &buf[0..bytes_received], sender);
+            buf.truncate(bytes_received);
+            debug!("received {:?} from {}", buf, sender);
             let end_instant = Instant::now();
             if let Some(rtm) = &receive_timeout_mut {
                 // subtract the elapsed time
@@ -438,7 +458,7 @@ impl LowLevelSnmp2cClient {
                 receive_timeout_mut = rtm.checked_sub(end_instant - start_instant);
                 if receive_timeout_mut.is_none() {
                     // duration would now be < 0 => we ran out of time; give up
-                    return Err(SnmpClientError::TimedOut);
+                    return Err(SnmpClientError::TimedOut {});
                 }
             }
             if !socket_addrs_equal(sender, target) {
@@ -448,11 +468,29 @@ impl LowLevelSnmp2cClient {
                 continue;
             }
 
-            buf.truncate(bytes_received);
-
             // parse the response
-            let message = Snmp2cMessage::try_from_bytes(&buf)
-                .map_err(|message_error| SnmpClientError::DecodingIncoming { message_error })?;
+            let message = match Snmp2cMessage::try_parse(&buf) {
+                Ok((rest, message)) => {
+                    // place rest back into buffer
+                    let mut rest_vec = Vec::from(rest);
+                    buf.clear();
+                    buf.append(&mut rest_vec);
+                    message
+                },
+                Err(nom::Err::Incomplete(_)) => {
+                    // we need more data; loop around
+                    debug!("needs more data");
+                    continue;
+                },
+                Err(nom::Err::Error(message_error)) => {
+                    // that failed
+                    return Err(SnmpClientError::DecodingIncoming { message_error });
+                },
+                Err(nom::Err::Failure(message_error)) => {
+                    // that failed
+                    return Err(SnmpClientError::DecodingIncoming { message_error });
+                },
+            };
 
             debug!("message from {} is {:?}", sender, message);
 

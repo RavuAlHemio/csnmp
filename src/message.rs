@@ -1,15 +1,20 @@
 use std::error::Error;
 use std::fmt;
+use std::io::Write;
 use std::net::Ipv4Addr;
 
 use derivative::Derivative;
-use from_to_repr::FromToRepr;
-use simple_asn1::{
-    ASN1Block, ASN1Class, ASN1DecodeErr, ASN1EncodeErr, BigInt, BigUint, FromASN1, from_der, OID,
-    ToASN1, to_der,
+use der_parser::ber::{
+    Class, MAX_RECURSION, parse_ber_container, parse_ber_null, parse_ber_sequence_defined_g, Tag,
 };
+use der_parser::error::BerError;
+use from_to_repr::FromToRepr;
+use nom::branch::alt;
+use nom::combinator::complete;
+use nom::multi::many0;
 
-use crate::oid::{ObjectIdentifier, ObjectIdentifierConversionError};
+use crate::asn1encode::{write_i128, write_octet_string, write_wrapped, write_u128, write_oid};
+use crate::oid::{MAX_SUB_IDENTIFIER_COUNT, ObjectIdentifier};
 
 
 /// Version value stored in every SNMP2c message.
@@ -32,352 +37,259 @@ pub enum ExpectedAsn1Type {
 }
 
 
-/// An error that has occurred while attempting to read an SNMP message.
-#[derive(Clone, Debug, PartialEq)]
+/// An error that has occurred while attempting to read or write an SNMP message.
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum SnmpMessageError {
     /// An error has occurred while attempting to parse the ASN.1 message.
-    Asn1Decoding(ASN1DecodeErr),
+    #[non_exhaustive]
+    Asn1Decoding { error: BerError },
 
-    /// An error has occurred while attempting to encode the ASN.1 message.
-    Asn1Encoding(ASN1EncodeErr),
+    /// An I/O error has occurred while attempting to encode the ASN.1 message.
+    #[non_exhaustive]
+    Asn1EncodingIO { error: std::io::Error },
 
     /// The message, or a part of it, has an incorrect length. A specific length is expected.
     ///
     /// `expected` and `obtained` are in units of ASN.1 blocks.
+    #[non_exhaustive]
     Length { expected: usize, obtained: usize },
 
-    /// The message, or a part of it, was too short. A minimum length is expected.
-    ///
-    /// `expected` and `obtained` are in units of ASN.1 blocks.
-    TooShort { expected: usize, obtained: usize },
-
-    /// While decoding the message, a different type was read than expected.
-    UnexpectedType { expected: ExpectedAsn1Type, obtained: ASN1Block },
-
-    /// While decoding an integer, it did not fit in the range of a primitive type.
-    IntegerPrimitiveRange { primitive_type: &'static str, obtained: ASN1Block },
-
     /// The SNMP message has an incorrect version.
+    #[non_exhaustive]
     IncorrectVersion { expected: i64, obtained: i64 },
 
-    /// A value was tagged by an unexpected tag.
-    UnexpectedTag { obtained: BigUint },
+    /// An out-of-range value has been obtained for an enumeration that was decoded as a 32-bit
+    /// unsigned integer.
+    #[non_exhaustive]
+    EnumRangeU32 { enum_name: &'static str, obtained: u32 },
 
-    /// A value was tagged by a tag of an unexpected class.
-    UnexpectedTagClass { expected: Vec<ASN1Class>, obtained: ASN1Class },
+    /// An object identifier has been encountered, one of whose arcs is greater than would fit in a
+    /// 32-bit unsigned integer.
+    #[non_exhaustive]
+    OidDecodeArcNotU32 { index: Option<usize> },
 
-    /// A value was expected to be tagged but wasn't.
-    UntaggedValue { obtained: ASN1Block },
-
-    /// An out-of-range value has been obtained for an enumeration.
-    EnumRange { enum_name: &'static str, obtained: ASN1Block },
-
-    /// An object identifier has been encountered which is a valid ASN.1 object identifier but not
-    /// a valid SNMP object identifier.
-    OidDecode { oid: OID, error: ObjectIdentifierConversionError },
-
-    /// An object identifier has been encountered which is a valid SNMP object identifier but not
-    /// a valid ASN.1 object identifier.
-    OidEncode { oid: ObjectIdentifier, error: ObjectIdentifierConversionError },
-}
-impl SnmpMessageError {
-    /// Checks whether the given slice of [`ASN1Block`s][ASN1Block] has at least the given number of
-    /// elements. Returns `Ok(())` if it does and `Err(_)` with an appropriate [`SnmpMessageError`]
-    /// variant if it does not.
-    pub fn check_min_length(blocks: &[ASN1Block], expected: usize) -> Result<(), SnmpMessageError> {
-        if blocks.len() < expected {
-            Err(SnmpMessageError::TooShort {
-                expected,
-                obtained: blocks.len(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Checks whether the given slice of [`ASN1Block`s][ASN1Block] has exactly the given number of
-    /// elements. Returns `Ok(())` if it does and `Err(_)` with an appropriate [`SnmpMessageError`]
-    /// variant if it does not.
-    pub fn check_length(blocks: &[ASN1Block], expected: usize) -> Result<(), SnmpMessageError> {
-        if blocks.len() != expected {
-            Err(SnmpMessageError::Length {
-                expected,
-                obtained: blocks.len(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Checks whether the given [`ASN1Class`] has the given value. Returns `Ok(())` if it does and
-    /// `Err(_)` with an appropriate [`SnmpMessageError`] variant if it does not.
-    pub fn check_tag_class(obtained: ASN1Class, expected: ASN1Class) -> Result<(), SnmpMessageError> {
-        if obtained != expected {
-            Err(SnmpMessageError::UnexpectedTagClass {
-                expected: vec![expected],
-                obtained,
-            })
-        } else {
-            Ok(())
-        }
-    }
+    /// The initial OID pair is `1.n` or `2.n` where `n` is 40 or greater.
+    #[non_exhaustive]
+    OidInvalidInitialPair { first: u32, second: u32 },
 }
 impl fmt::Display for SnmpMessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Asn1Decoding(asn1)
-                => write!(f, "ASN.1 decoding error: {}", asn1),
-            Self::Asn1Encoding(asn1)
-                => write!(f, "ASN.1 encoding error: {}", asn1),
+            Self::Asn1Decoding { error }
+                => write!(f, "ASN.1 decoding error: {}", error),
+            Self::Asn1EncodingIO { error }
+                => write!(f, "ASN.1 encoding I/O error: {}", error),
             Self::Length { expected, obtained }
                 => write!(f, "message has wrong length: expected {} ASN.1 blocks, obtained {}", expected, obtained),
-            Self::TooShort { expected, obtained }
-                => write!(f, "message too short: expected {} ASN.1 blocks, obtained {}", expected, obtained),
-            Self::UnexpectedType { expected, obtained }
-                => write!(f, "expected {:?} value, obtained {:?}", expected, obtained),
-            Self::IntegerPrimitiveRange { primitive_type, obtained }
-                => write!(f, "integer value does not fit into {}, obtained {:?}", primitive_type, obtained),
             Self::IncorrectVersion { expected, obtained }
                 => write!(f, "incorrect SNMP message version: expected {}, obtained {}", expected, obtained),
-            Self::UnexpectedTag { obtained }
-                => write!(f, "unexpected tag; obtained {:?}", obtained),
-            Self::UnexpectedTagClass { expected, obtained }
-                => write!(f, "unexpected tag class: expected {:?}, obtained {:?}", expected, obtained),
-            Self::UntaggedValue { obtained }
-                => write!(f, "untagged value; obtained {:?}", obtained),
-            Self::EnumRange { enum_name, obtained }
+            Self::EnumRangeU32 { enum_name, obtained }
                 => write!(f, "invalid value {:?} obtained for enumeration {:?}", obtained, enum_name),
-            Self::OidDecode { oid, error }
-                => write!(f, "object identifier {:?} invalid for SNMP: {}", oid, error),
-            Self::OidEncode { oid, error }
-                => write!(f, "object identifier {:?} invalid for ASN.1: {}", oid, error),
+            Self::OidDecodeArcNotU32 { index } => match index {
+                Some(i) => write!(f, "encountered OID whose arc at position {} does not fit into u32", i),
+                None => write!(f, "encountered OID one of whose arcs does not fit into u32"),
+            },
+            Self::OidInvalidInitialPair { first, second }
+                => write!(f, "OID starts with {}.{}, but if the first value is {}, the second cannot be >= 40", first, second, first),
         }
     }
 }
 impl Error for SnmpMessageError {
+    fn cause(&self) -> Option<&dyn Error> {
+        match self {
+            Self::Asn1Decoding { error } => Some(error),
+            Self::Asn1EncodingIO { error } => Some(error),
+            Self::Length { expected: _, obtained: _ } => None,
+            Self::IncorrectVersion { expected: _, obtained: _ } => None,
+            Self::EnumRangeU32 { enum_name: _, obtained: _ } => None,
+            Self::OidDecodeArcNotU32 { index: _ } => None,
+            Self::OidInvalidInitialPair { first: _, second: _ } => None,
+        }
+    }
 }
-impl From<ASN1DecodeErr> for SnmpMessageError {
-    fn from(e: ASN1DecodeErr) -> Self { Self::Asn1Decoding(e) }
+impl nom::error::ParseError<&[u8]> for SnmpMessageError {
+    fn from_error_kind(_input: &[u8], kind: nom::error::ErrorKind) -> Self {
+        Self::Asn1Decoding { error: BerError::NomError(kind) }
+    }
+    fn append(_input: &[u8], kind: nom::error::ErrorKind, _other: Self) -> Self {
+        Self::Asn1Decoding { error: BerError::NomError(kind) }
+    }
 }
-impl From<ASN1EncodeErr> for SnmpMessageError {
-    fn from(e: ASN1EncodeErr) -> Self { Self::Asn1Encoding(e) }
+impl From<BerError> for SnmpMessageError {
+    fn from(value: BerError) -> Self {
+        Self::Asn1Decoding { error: value }
+    }
 }
 
 
-/// Implements a conversion from an ASN.1 number block to a primitive integral value.
-macro_rules! asn1_number_to_primitive {
-    ($name:ident, $type:ty) => {
-        fn $name(&self) -> Result<$type, SnmpMessageError> {
-            if let Self::Integer(_offset, value) = self {
-                value.try_into()
-                    .map_err(|_| SnmpMessageError::IntegerPrimitiveRange {
-                        primitive_type: stringify!($type),
-                        obtained: self.clone(),
-                    })
-            } else {
-                Err(SnmpMessageError::UnexpectedType {
-                    expected: ExpectedAsn1Type::Integer,
-                    obtained: self.clone(),
-                })
+/// Trait implemented by structs and enums that can be serialized to and deserialized from an
+/// encoded form according to ASN.1 BER.
+pub trait Asn1BerCodable {
+    /// Serializes this enum or struct into a writer.
+    fn write_bytes<W: Write>(&self, write: W) -> Result<usize, SnmpMessageError>;
+
+    /// Attempts to deserialize this enum or struct from a slice of bytes.
+    ///
+    /// As common with `nom`-based parsers, on success, returns `Ok((rest, obj))` where `obj` is
+    /// an instance of this enum or struct and `rest` is the remaining byte slice that was not
+    /// consumed by the parser. On failure, `Err(e)` is returned where `e` describes the error.
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> where Self: Sized;
+
+    /// Serializes this enum or struct into a vector of bytes.
+    fn to_bytes(&self) -> Result<Vec<u8>, SnmpMessageError> {
+        let mut buf = Vec::new();
+        self.write_bytes(&mut buf)?;
+        Ok(buf)
+    }
+}
+
+
+/// Attempts to parse the bytes as an octet string.
+///
+/// On success, returns `Ok((rest, str))` where `rest` are the remaining unparsed bytes and `str` is
+/// the octet string as a byte slice.
+fn parse_ber_octetstring(bytes: &[u8]) -> Result<(&[u8], &[u8]), nom::Err<SnmpMessageError>> {
+    match der_parser::ber::parse_ber_octetstring(bytes) {
+        Ok((rest, octet_string_ber)) => match octet_string_ber.as_slice() {
+            Ok(os) => Ok((rest, os)),
+            Err(error) => Err(nom::Err::Error(SnmpMessageError::Asn1Decoding { error })),
+        },
+        Err(e) => Err(e.map(|error| SnmpMessageError::Asn1Decoding { error })),
+    }
+}
+
+
+/// Attempts to parse the bytes as an octet string, ensuring that the value has the given class and
+/// tag.
+///
+/// On success, returns `Ok((rest, str))` where `rest` are the remaining unparsed bytes and `str` is
+/// the octet string as a byte slice.
+fn parse_ber_octetstring_class_tag<C: Into<Class>, T: Into<Tag>>(bytes: &[u8], class: C, tag: T) -> Result<(&[u8], &[u8]), nom::Err<SnmpMessageError>> {
+    let class = class.into();
+    let tag = tag.into();
+    let (rest, hdr) = der_parser::ber::ber_read_element_header(bytes)
+        .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error }))?;
+    hdr.assert_class(class)
+        .map_err(|error| nom::Err::Error(SnmpMessageError::Asn1Decoding { error }))?;
+    hdr.assert_tag(tag)
+        .map_err(|error| nom::Err::Error(SnmpMessageError::Asn1Decoding { error }))?;
+    let (rest, content) = der_parser::ber::ber_read_element_content_as(
+        rest,
+        Tag::OctetString, // override the tag
+        hdr.length(),
+        hdr.is_constructed(),
+        MAX_RECURSION,
+    )
+        .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error }))?;
+    let ber_object = der_parser::ber::BerObject::from_header_and_content(hdr, content);
+    match ber_object.as_slice() {
+        Ok(os) => Ok((rest, os)),
+        Err(error) => Err(nom::Err::Error(SnmpMessageError::Asn1Decoding { error })),
+    }
+}
+
+macro_rules! define_int_parser {
+    ($name:ident, $ct_name:ident, $conv_func:ident, $ret_type:ty) => {
+        /// Attempts to parse the bytes as an ASN.1 integer and convert them into the given integer
+        /// type.
+        ///
+        /// On success, returns `Ok((rest, i))` where `rest` are the remaining unparsed bytes and
+        /// `i` is the integer.
+        #[allow(unused)]
+        fn $name(bytes: &[u8]) -> Result<(&[u8], $ret_type), nom::Err<SnmpMessageError>> {
+            match der_parser::ber::parse_ber_integer(bytes) {
+                Ok((rest, integer_ber)) => {
+                    match integer_ber.$conv_func() {
+                        Ok(integer) => Ok((rest, integer)),
+                        Err(error) => Err(nom::Err::Error(SnmpMessageError::Asn1Decoding { error })),
+                    }
+                },
+                Err(e) => Err(e.map(|error| SnmpMessageError::Asn1Decoding { error })),
+            }
+        }
+
+        /// Attempts to parse the bytes as an ASN.1 integer, ensuring that the value has the given
+        /// class and tag, and to convert them into the given integer type.
+        ///
+        /// On success, returns `Ok((rest, i))` where `rest` are the remaining unparsed bytes and
+        /// `i` is the integer.
+        #[allow(unused)]
+        fn $ct_name<C: Into<Class>, T: Into<Tag>>(bytes: &[u8], class: C, tag: T) -> Result<(&[u8], $ret_type), nom::Err<SnmpMessageError>> {
+            let class = class.into();
+            let tag = tag.into();
+
+            let (rest, hdr) = der_parser::ber::ber_read_element_header(bytes)
+                .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error }))?;
+            hdr.assert_class(class)
+                .map_err(|error| nom::Err::Error(SnmpMessageError::Asn1Decoding { error }))?;
+            hdr.assert_tag(tag)
+                .map_err(|error| nom::Err::Error(SnmpMessageError::Asn1Decoding { error }))?;
+            let (rest, content) = der_parser::ber::ber_read_element_content_as(
+                rest,
+                Tag::Integer, // override the tag
+                hdr.length(),
+                hdr.is_constructed(),
+                MAX_RECURSION,
+            )
+                .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error }))?;
+            let ber_object = der_parser::ber::BerObject::from_header_and_content(hdr, content);
+            match ber_object.$conv_func() {
+                Ok(integer) => Ok((rest, integer)),
+                Err(error) => Err(nom::Err::Error(SnmpMessageError::Asn1Decoding { error })),
             }
         }
     };
 }
+define_int_parser!(parse_ber_integer_i64, parse_ber_integer_i64_class_tag, as_i64, i64);
+define_int_parser!(parse_ber_integer_u64, parse_ber_integer_u64_class_tag, as_u64, u64);
+define_int_parser!(parse_ber_integer_i32, parse_ber_integer_i32_class_tag, as_i32, i32);
+define_int_parser!(parse_ber_integer_u32, parse_ber_integer_u32_class_tag, as_u32, u32);
 
-/// Implements a conversion from a primitive integral value to an ASN.1 number block.
-macro_rules! asn1_number_from_primitive {
-    ($name:ident, $type:ty) => {
-        fn $name(i: $type) -> Self { Self::Integer(0, BigInt::from(i)) }
+fn parse_ber_oid(bytes: &[u8]) -> Result<(&[u8], ObjectIdentifier), nom::Err<SnmpMessageError>> {
+    let (rest, name_ber) = der_parser::ber::parse_ber_oid(bytes)
+        .map_err(|err| err.map(|error| error.into()))?;
+    let oid_ber = name_ber.as_oid()
+        .map_err(|error| nom::Err::Error(error.into()))?;
+
+    let mut oid_array = [0u32; MAX_SUB_IDENTIFIER_COUNT];
+    let oid_iter = match oid_ber.iter() {
+        Some(oi) => oi,
+        None => return Err(nom::Err::Error(SnmpMessageError::OidDecodeArcNotU32 { index: None })),
     };
+    let mut arc_count = 0;
+    for (index, arc_u64) in oid_iter.enumerate() {
+        let arc_u32 = match arc_u64.try_into() {
+            Ok(au) => au,
+            Err(_) => return Err(nom::Err::Error(SnmpMessageError::OidDecodeArcNotU32 { index: None })),
+        };
+        oid_array[index] = arc_u32;
+        arc_count += 1;
+    }
+
+    let oid = ObjectIdentifier::new(arc_count, oid_array);
+    Ok((rest, oid))
 }
 
-
-
-/// Extension functions on [`ASN1Block`].
-trait Asn1BlockExtensions: Sized {
-    /// Attempts to decode the block as an integer and convert it to an `i32`.
-    fn as_i32(&self) -> Result<i32, SnmpMessageError>;
-
-    /// Attempts to decode the block as an integer and convert it to an `i64`.
-    fn as_i64(&self) -> Result<i64, SnmpMessageError>;
-
-    /// Attempts to decode the block as an integer and convert it to a `u8`.
-    fn as_u8(&self) -> Result<u8, SnmpMessageError>;
-
-    /// Attempts to decode the block as an integer and convert it to a `u32`.
-    fn as_u32(&self) -> Result<u32, SnmpMessageError>;
-
-    /// Attempts to decode the block as an integer and convert it to a `u64`.
-    fn as_u64(&self) -> Result<u64, SnmpMessageError>;
-
-    /// Attempts to decode the block as an integer and convert it to a [`BigInt`].
-    fn as_big_int(&self) -> Result<BigInt, SnmpMessageError>;
-
-    /// Attempts to decode the block as an integer and convert it to a [`BigUint`].
-    fn as_big_uint(&self) -> Result<BigUint, SnmpMessageError>;
-
-    /// Attempts to decode the block as an octet string and return it as a reference to a `Vec<u8>`.
-    fn as_bytes(&self) -> Result<&Vec<u8>, SnmpMessageError>;
-
-    /// Attempts to decode the block a sequence and return it as a reference to a `Vec<Self>`.
-    fn as_sequence(&self) -> Result<&Vec<Self>, SnmpMessageError>;
-
-    /// Attempts to decode the block an object identifier.
-    fn as_oid(&self) -> Result<&OID, SnmpMessageError>;
-
-    /// Returns whether this block is a null block.
-    fn is_null(&self) -> bool;
-
-    /// Wraps an u8 in an ASN.1 number block.
-    fn from_u8(i: u8) -> Self;
-
-    /// Wraps an i32 in an ASN.1 number block.
-    fn from_i32(i: i32) -> Self;
-
-    /// Wraps an i64 in an ASN.1 number block.
-    fn from_i64(i: i64) -> Self;
-
-    /// Wraps a u32 in an ASN.1 number block.
-    fn from_u32(i: u32) -> Self;
-
-    /// Wraps a u64 in an ASN.1 number block.
-    fn from_u64(i: u64) -> Self;
-
-    /// Wraps a slice of bytes in an ASN.1 octet-string block.
-    fn from_bytes(bs: &[u8]) -> Self;
-
-    /// Attempts to return the tag of this value.
-    fn implicit_tag(&self) -> Result<(ASN1Class, BigUint), SnmpMessageError>;
-
-    /// Attempts to return the tag of this value as long as it is the type of tag specified by the
-    /// argument.
-    fn tag_of_class(&self, of_class: ASN1Class) -> Result<BigUint, SnmpMessageError> {
-        let (cls, tag) = self.implicit_tag()?;
-        if cls == of_class {
-            Ok(tag)
-        } else {
-            Err(SnmpMessageError::UnexpectedTagClass {
-                expected: vec![of_class],
-                obtained: cls,
-            })
-        }
-    }
-
-    /// Attempts to return the value without its tag.
-    fn untag_implicit(&self) -> Result<Self, SnmpMessageError>;
-
-    /// Packs this value into a tag.
-    fn with_tag(self, of_class: ASN1Class, tag: BigUint) -> Self;
-}
-impl Asn1BlockExtensions for ASN1Block {
-    asn1_number_to_primitive!(as_i64, i64);
-    asn1_number_to_primitive!(as_i32, i32);
-    asn1_number_to_primitive!(as_u8, u8);
-    asn1_number_to_primitive!(as_u32, u32);
-    asn1_number_to_primitive!(as_u64, u64);
-
-    fn as_big_int(&self) -> Result<BigInt, SnmpMessageError> {
-        if let Self::Integer(_offset, value) = self {
-            Ok(value.clone())
-        } else {
-            Err(SnmpMessageError::UnexpectedType {
-                expected: ExpectedAsn1Type::Integer,
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn as_big_uint(&self) -> Result<BigUint, SnmpMessageError> {
-        if let Self::Integer(_offset, value) = self {
-            value.try_into()
-                .map_err(|_| SnmpMessageError::IntegerPrimitiveRange {
-                    primitive_type: "BigUint",
-                    obtained: self.clone(),
-                })
-        } else {
-            Err(SnmpMessageError::UnexpectedType {
-                expected: ExpectedAsn1Type::Integer,
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn as_bytes(&self) -> Result<&Vec<u8>, SnmpMessageError> {
-        if let Self::OctetString(_offset, bytes) = self {
-            Ok(bytes)
-        } else {
-            Err(SnmpMessageError::UnexpectedType {
-                expected: ExpectedAsn1Type::OctetString,
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn as_sequence(&self) -> Result<&Vec<Self>, SnmpMessageError> {
-        if let Self::Sequence(_offset, blocks) = self {
-            Ok(blocks)
-        } else {
-            Err(SnmpMessageError::UnexpectedType {
-                expected: ExpectedAsn1Type::Sequence,
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn as_oid(&self) -> Result<&OID, SnmpMessageError> {
-        if let Self::ObjectIdentifier(_offset, oid) = self {
-            Ok(oid)
-        } else {
-            Err(SnmpMessageError::UnexpectedType {
-                expected: ExpectedAsn1Type::Oid,
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn is_null(&self) -> bool {
-        if let Self::Null(_offset) = self {
-            true
-        } else {
-            false
-        }
-    }
-
-    asn1_number_from_primitive!(from_i32, i32);
-    asn1_number_from_primitive!(from_i64, i64);
-    asn1_number_from_primitive!(from_u8, u8);
-    asn1_number_from_primitive!(from_u32, u32);
-    asn1_number_from_primitive!(from_u64, u64);
-
-    fn from_bytes(bs: &[u8]) -> Self {
-        Self::OctetString(0, Vec::from(bs))
-    }
-
-    fn implicit_tag(&self) -> Result<(ASN1Class, BigUint), SnmpMessageError> {
-        if let Self::Unknown(cls, _constructed, _offset, tag, _content) = self {
-            Ok((*cls, tag.clone()))
-        } else {
-            Err(SnmpMessageError::UntaggedValue {
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn untag_implicit(&self) -> Result<Self, SnmpMessageError> {
-        if let Self::Unknown(_cls, _constructed, offset, _tag, content) = self {
-            let parsed_blocks = from_der(&content)?;
-            let sequence = ASN1Block::Sequence(*offset, parsed_blocks);
-            Ok(sequence)
-        } else {
-            Err(SnmpMessageError::UntaggedValue {
-                obtained: self.clone(),
-            })
-        }
-    }
-
-    fn with_tag(self, of_class: ASN1Class, tag: BigUint) -> Self {
-        Self::Explicit(of_class, self.offset(), tag, Box::new(self))
-    }
+pub fn parse_ber_class_tagged_implicit_g<'a, C, T, Output, F>(
+    class: C,
+    tag: T,
+    f: F,
+) -> impl FnMut(&'a [u8]) -> Result<(&[u8], Output), nom::Err<SnmpMessageError>>
+where
+    F: Fn(&'a [u8], der_parser::ber::Header<'a>, usize) -> Result<(&'a [u8], Output), nom::Err<SnmpMessageError>>,
+    T: Into<Tag>,
+    C: Into<Class>,
+{
+    let tag = tag.into();
+    let class = class.into();
+    parse_ber_container(move |i, hdr| {
+        hdr.assert_tag(tag).map_err(|e| nom::Err::Error(e.into()))?;
+        hdr.assert_class(class).map_err(|e| nom::Err::Error(e.into()))?;
+        // XXX MAX_RECURSION should not be used, it resets the depth counter
+        f(i, hdr, MAX_RECURSION)
+        // trailing bytes are ignored
+    })
 }
 
 
@@ -390,58 +302,37 @@ pub struct Snmp2cMessage {
     pub community: Vec<u8>,
     pub pdu: Snmp2cPdu,
 }
-impl Snmp2cMessage {
-    /// Serializes this SNMP2c message into a vector of bytes.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, SnmpMessageError> {
-        simple_asn1::der_encode(self)
+impl Asn1BerCodable for Snmp2cMessage {
+    fn write_bytes<W: Write>(&self, write: W) -> Result<usize, SnmpMessageError> {
+        let mut sequence_bytes = Vec::new();
+        write_i128(&mut sequence_bytes, self.version.into(), None, None)?;
+        write_octet_string(&mut sequence_bytes, &self.community, None, None)?;
+        self.pdu.write_bytes(&mut sequence_bytes)?;
+
+        write_wrapped(write, Class::Universal, true, Tag::Sequence, &sequence_bytes)
     }
 
-    /// Attempts to deserialize this SNMP2c message from a slice of bytes.
-    pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, SnmpMessageError> {
-        simple_asn1::der_decode(bytes)
-    }
-}
-impl FromASN1 for Snmp2cMessage {
-    type Error = SnmpMessageError;
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        parse_ber_sequence_defined_g(|rest, _hdr| {
+            let (rest, version) = parse_ber_integer_i64(rest)?;
+            if version != 1 {
+                return Err(nom::Err::Failure(SnmpMessageError::IncorrectVersion { expected: 1, obtained: version }));
+            }
 
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-        let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 3)?;
+            let (rest, community) = parse_ber_octetstring(rest)?;
+            let (rest, pdu) = Snmp2cPdu::try_parse(rest)?;
 
-        let version = seq[0].as_i64()?;
-        if version != VERSION_VALUE {
-            return Err(SnmpMessageError::IncorrectVersion {
-                expected: VERSION_VALUE,
-                obtained: version,
-            });
-        }
-        let community = seq[1].as_bytes()?.clone();
-        let (pdu, _rest) = Snmp2cPdu::from_asn1(&seq[2..3])?;
-
-        let message = Self {
-            version,
-            community,
-            pdu,
-        };
-        Ok((message, &v[1..]))
-    }
-}
-impl ToASN1 for Snmp2cMessage {
-    type Error = SnmpMessageError;
-
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut pdu_asn1 = self.pdu.to_asn1()?;
-        let mut ret = Vec::with_capacity(2 + pdu_asn1.len());
-
-        ret.push(ASN1Block::from_i64(self.version));
-        ret.push(ASN1Block::from_bytes(&self.community));
-        ret.append(&mut pdu_asn1);
-
-        Ok(vec![ASN1Block::Sequence(0, ret)])
+            let message = Self {
+                version,
+                community: Vec::from(community),
+                pdu,
+            };
+            Ok((rest, message))
+        })(bytes)
     }
 }
 
+// RFC3416, section 3.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Snmp2cPdu {
     GetRequest(InnerPdu),
@@ -466,79 +357,110 @@ impl Snmp2cPdu {
         }
     }
 }
-impl FromASN1 for Snmp2cPdu {
-    type Error = SnmpMessageError;
-
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-        let tag = v[0].tag_of_class(ASN1Class::ContextSpecific)?;
-        let untagged = v[0].untag_implicit()?;
-
-        let tag_0 = BigUint::from(0u8);
-        let tag_1 = BigUint::from(1u8);
-        let tag_2 = BigUint::from(2u8);
-        let tag_3 = BigUint::from(3u8);
-        let tag_5 = BigUint::from(5u8);
-        let tag_6 = BigUint::from(6u8);
-        let tag_7 = BigUint::from(7u8);
-
-        let outer_pdu = if (tag >= tag_0 && tag <= tag_3) || (tag >= tag_6 && tag <= tag_7) {
-            let (inner_pdu, _rest) = InnerPdu::from_asn1(&[untagged.clone()])?;
-            if tag == tag_0 {
-                Self::GetRequest(inner_pdu)
-            } else if tag == tag_1 {
-                Self::GetNextRequest(inner_pdu)
-            } else if tag == tag_2 {
-                Self::Response(inner_pdu)
-            } else if tag == tag_3 {
-                Self::SetRequest(inner_pdu)
-            } else if tag == tag_6 {
-                Self::InformRequest(inner_pdu)
-            } else if tag == tag_7 {
-                Self::SnmpV2Trap(inner_pdu)
-            } else {
-                unreachable!()
-            }
-        } else if tag == tag_5 {
-            let (bulk_pdu, _rest) = BulkPdu::from_asn1(&[untagged.clone()])?;
-            Self::GetBulkRequest(bulk_pdu)
-        } else {
-            return Err(SnmpMessageError::UnexpectedTag {
-                obtained: tag,
-            });
+impl Asn1BerCodable for Snmp2cPdu {
+    fn write_bytes<W: Write>(&self, write: W) -> Result<usize, SnmpMessageError> {
+        let mut inner_bytes = Vec::new();
+        let tag = match self {
+            Self::GetRequest(inner_pdu) => {
+                inner_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(0)
+            },
+            Self::GetNextRequest(inner_pdu) => {
+                inner_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(1)
+            },
+            Self::Response(inner_pdu) => {
+                inner_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(2)
+            },
+            Self::SetRequest(inner_pdu) => {
+                inner_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(3)
+            },
+            Self::GetBulkRequest(bulk_pdu) => {
+                bulk_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(5)
+            },
+            Self::InformRequest(inner_pdu) => {
+                inner_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(6)
+            },
+            Self::SnmpV2Trap(inner_pdu) => {
+                inner_pdu.write_bytes(&mut inner_bytes)?;
+                Tag(7)
+            },
         };
 
-        Ok((outer_pdu, &v[1..]))
+        write_wrapped(write, Class::ContextSpecific, true, tag, &inner_bytes)
     }
-}
-impl ToASN1 for Snmp2cPdu {
-    type Error = SnmpMessageError;
 
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let (tag, inner) = match self {
-            Self::GetRequest(pdu) => (0u8, pdu.to_asn1()?),
-            Self::GetNextRequest(pdu) => (1, pdu.to_asn1()?),
-            Self::Response(pdu) => (2, pdu.to_asn1()?),
-            Self::SetRequest(pdu) => (3, pdu.to_asn1()?),
-            Self::GetBulkRequest(pdu) => (5, pdu.to_asn1()?),
-            Self::InformRequest(pdu) => (6, pdu.to_asn1()?),
-            Self::SnmpV2Trap(pdu) => (7, pdu.to_asn1()?),
-        };
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        alt((
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    0,
+                    |content, _hdr, _depth| InnerPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, inner_pdu)| (rest, Self::GetRequest(inner_pdu)))
+            ),
 
-        let mut all_inner = Vec::new();
-        for inner_block in &inner {
-            let mut inner_bytes = to_der(inner_block)?;
-            all_inner.append(&mut inner_bytes);
-        }
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    1,
+                    |content, _hdr, _depth| InnerPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, inner_pdu)| (rest, Self::GetNextRequest(inner_pdu)))
+            ),
 
-        let outer_pdu = ASN1Block::Unknown(
-            ASN1Class::ContextSpecific,
-            true,
-            0,
-            BigUint::from(tag),
-            all_inner,
-        );
-        Ok(vec![outer_pdu])
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    2,
+                    |content, _hdr, _depth| InnerPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, inner_pdu)| (rest, Self::Response(inner_pdu)))
+            ),
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    3,
+                    |content, _hdr, _depth| InnerPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, inner_pdu)| (rest, Self::SetRequest(inner_pdu)))
+            ),
+
+            // tag 4 is obsolete (Trap-PDU from SNMPv1)
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    5,
+                    |content, _hdr: der_parser::der::Header, _depth| BulkPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, bulk_pdu)| (rest, Self::GetBulkRequest(bulk_pdu)))
+            ),
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    6,
+                    |content, _hdr, _depth| InnerPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, inner_pdu)| (rest, Self::InformRequest(inner_pdu)))
+            ),
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    7,
+                    |content, _hdr, _depth| InnerPdu::try_parse(content),
+                )(bytes)
+                    .map(|(rest, inner_pdu)| (rest, Self::SnmpV2Trap(inner_pdu)))
+            ),
+        ))(bytes)
     }
 }
 
@@ -573,25 +495,44 @@ pub struct InnerPdu {
     pub error_index: u32,
     pub variable_bindings: Vec<VariableBinding>,
 }
-impl FromASN1 for InnerPdu {
-    type Error = SnmpMessageError;
+impl Asn1BerCodable for InnerPdu {
+    fn write_bytes<W: Write>(&self, mut write: W) -> Result<usize, SnmpMessageError> {
+        let mut total_bytes = 0;
+        total_bytes += write_i128(&mut write, self.request_id.into(), None, None)?;
+        total_bytes += write_u128(&mut write, u8::from(self.error_status).into(), None, None)?;
+        total_bytes += write_u128(&mut write, self.error_index.into(), None, None)?;
 
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-        let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 4)?;
-
-        let request_id = seq[0].as_i32()?;
-        let error_status = ErrorStatus::try_from(seq[1].as_u8()?)
-            .map_err(|_| SnmpMessageError::EnumRange { enum_name: "ErrorStatus", obtained: seq[1].clone() })?;
-        let error_index = seq[2].as_u32()?;
-
-        let bindings_sequence = seq[3].as_sequence()?;
-        let mut variable_bindings = Vec::with_capacity(bindings_sequence.len());
-        for block in bindings_sequence {
-            let (binding, _rest) = VariableBinding::from_asn1(&[block.clone()])?;
-            variable_bindings.push(binding);
+        let mut bindings_sequence = Vec::new();
+        for binding in &self.variable_bindings {
+            binding.write_bytes(&mut bindings_sequence)?;
         }
+        total_bytes += write_wrapped(&mut write, Class::Universal, true, Tag::Sequence, &bindings_sequence)?;
+
+        Ok(total_bytes)
+    }
+
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        let (rest, request_id) = parse_ber_integer_i32(bytes)?;
+        let (rest, error_status_u32) = parse_ber_integer_u32(rest)?;
+        let error_status_u8: u8 = match error_status_u32.try_into() {
+            Ok(esu) => esu,
+            Err(_) => return Err(nom::Err::Error(SnmpMessageError::EnumRangeU32 {
+                enum_name: "ErrorStatus",
+                obtained: error_status_u32,
+            })),
+        };
+        let error_status: ErrorStatus = match error_status_u8.try_into() {
+            Ok(es) => es,
+            Err(_) => return Err(nom::Err::Error(SnmpMessageError::EnumRangeU32 {
+                enum_name: "ErrorStatus",
+                obtained: error_status_u8.into(),
+            })),
+        };
+        let (rest, error_index) = parse_ber_integer_u32(rest)?;
+
+        let (rest, variable_bindings) = parse_ber_sequence_defined_g(
+            |bytes, _header| many0(complete(VariableBinding::try_parse))(bytes)
+        )(rest)?;
 
         let inner_pdu = Self {
             request_id,
@@ -599,26 +540,7 @@ impl FromASN1 for InnerPdu {
             error_index,
             variable_bindings,
         };
-        Ok((inner_pdu, &v[1..]))
-    }
-}
-impl ToASN1 for InnerPdu {
-    type Error = SnmpMessageError;
-
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::with_capacity(4);
-        ret.push(ASN1Block::from_i32(self.request_id));
-        ret.push(ASN1Block::from_u8(self.error_status.into()));
-        ret.push(ASN1Block::from_u32(self.error_index));
-
-        let mut bindings = Vec::with_capacity(self.variable_bindings.len());
-        for binding in &self.variable_bindings {
-            let mut binding_asn1 = binding.to_asn1()?;
-            bindings.append(&mut binding_asn1);
-        }
-        ret.push(ASN1Block::Sequence(0, bindings));
-
-        Ok(ret)
+        Ok((rest, inner_pdu))
     }
 }
 
@@ -629,51 +551,38 @@ pub struct BulkPdu {
     pub max_repetitions: u32,
     pub variable_bindings: Vec<VariableBinding>,
 }
-impl FromASN1 for BulkPdu {
-    type Error = SnmpMessageError;
+impl Asn1BerCodable for BulkPdu {
+    fn write_bytes<W: Write>(&self, mut write: W) -> Result<usize, SnmpMessageError> {
+        let mut total_bytes = 0;
+        total_bytes += write_i128(&mut write, self.request_id.into(), None, None)?;
+        total_bytes += write_u128(&mut write, self.non_repeaters.into(), None, None)?;
+        total_bytes += write_u128(&mut write, self.max_repetitions.into(), None, None)?;
 
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-        let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 4)?;
-
-        let request_id = seq[0].as_i32()?;
-        let non_repeaters = seq[1].as_u32()?;
-        let max_repetitions = seq[2].as_u32()?;
-
-        let bindings_sequence = seq[3].as_sequence()?;
-        let mut variable_bindings = Vec::with_capacity(bindings_sequence.len());
-        for block in bindings_sequence {
-            let (binding, _rest) = VariableBinding::from_asn1(&[block.clone()])?;
-            variable_bindings.push(binding);
+        let mut bindings_sequence = Vec::new();
+        for binding in &self.variable_bindings {
+            binding.write_bytes(&mut bindings_sequence)?;
         }
+        total_bytes += write_wrapped(&mut write, Class::Universal, true, Tag::Sequence, &bindings_sequence)?;
 
-        let bulk_pdu = Self {
+        Ok(total_bytes)
+    }
+
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        let (rest, request_id) = parse_ber_integer_i32(bytes)?;
+        let (rest, non_repeaters) = parse_ber_integer_u32(rest)?;
+        let (rest, max_repetitions) = parse_ber_integer_u32(rest)?;
+
+        let (rest, variable_bindings) = parse_ber_sequence_defined_g(
+            |bytes, _header| many0(complete(VariableBinding::try_parse))(bytes)
+        )(rest)?;
+
+        let inner_pdu = Self {
             request_id,
             non_repeaters,
             max_repetitions,
             variable_bindings,
         };
-        Ok((bulk_pdu, &v[1..]))
-    }
-}
-impl ToASN1 for BulkPdu {
-    type Error = SnmpMessageError;
-
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::with_capacity(4);
-        ret.push(ASN1Block::from_i32(self.request_id));
-        ret.push(ASN1Block::from_u32(self.non_repeaters));
-        ret.push(ASN1Block::from_u32(self.max_repetitions));
-
-        let mut bindings = Vec::with_capacity(self.variable_bindings.len());
-        for binding in &self.variable_bindings {
-            let mut binding_asn1 = binding.to_asn1()?;
-            bindings.append(&mut binding_asn1);
-        }
-        ret.push(ASN1Block::Sequence(0, bindings));
-
-        Ok(ret)
+        Ok((rest, inner_pdu))
     }
 }
 
@@ -682,48 +591,27 @@ pub struct VariableBinding {
     pub name: ObjectIdentifier,
     pub value: BindingValue,
 }
-impl FromASN1 for VariableBinding {
-    type Error = SnmpMessageError;
+impl Asn1BerCodable for VariableBinding {
+    fn write_bytes<W: Write>(&self, write: W) -> Result<usize, SnmpMessageError> {
+        let mut binding_sequence = Vec::new();
 
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-        let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 2)?;
+        write_oid(&mut binding_sequence, &self.name, None, None)?;
+        self.value.write_bytes(&mut binding_sequence)?;
 
-        let name_asn1 = seq[0].as_oid()?;
-        let name = ObjectIdentifier::try_from(name_asn1)
-            .map_err(|error| SnmpMessageError::OidDecode {
-                oid: name_asn1.clone(),
-                error,
-            })?;
-
-        let (value, _rest) = BindingValue::from_asn1(&[seq[1].clone()])?;
-
-        let binding = Self {
-            name,
-            value,
-        };
-        Ok((binding, &v[1..]))
+        write_wrapped(write, Class::Universal, true, Tag::Sequence, &binding_sequence)
     }
-}
-impl ToASN1 for VariableBinding {
-    type Error = SnmpMessageError;
 
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut val_vec = self.value.to_asn1()?;
-        let mut ret = Vec::with_capacity(1 + val_vec.len());
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        parse_ber_sequence_defined_g(|rest, _hdr| {
+            let (rest, name) = parse_ber_oid(rest)?;
+            let (rest, value) = BindingValue::try_parse(rest)?;
 
-        let name_asn1: OID = (&self.name).try_into()
-            .map_err(|error| SnmpMessageError::OidEncode {
-                oid: self.name.clone(),
-                error,
-            })?;
-
-        ret.push(ASN1Block::ObjectIdentifier(0, name_asn1));
-        ret.append(&mut val_vec);
-
-        let inner_pdu = ASN1Block::Sequence(0, ret);
-        Ok(vec![inner_pdu])
+            let binding = Self {
+                name,
+                value,
+            };
+            Ok((rest, binding))
+        })(bytes)
     }
 }
 
@@ -746,60 +634,73 @@ pub enum BindingValue {
     /// An error signifying that no more values remain.
     EndOfMibView,
 }
-impl FromASN1 for BindingValue {
-    type Error = SnmpMessageError;
-
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-        let binding_value = match &v[0] {
-            ASN1Block::Null(_offset) => Self::Unspecified,
-            ASN1Block::Unknown(ASN1Class::ContextSpecific, _constructed, _offset, tag, content_bytes) => {
-                if content_bytes.len() > 0 {
-                    return Err(SnmpMessageError::UnexpectedType {
-                        expected: ExpectedAsn1Type::Null,
-                        obtained: v[0].clone(),
-                    });
-                }
-
-                if tag == &BigUint::from(0u8) {
-                    Self::NoSuchObject
-                } else if tag == &BigUint::from(1u8) {
-                    Self::NoSuchInstance
-                } else if tag == &BigUint::from(2u8) {
-                    Self::EndOfMibView
-                } else {
-                    return Err(SnmpMessageError::EnumRange {
-                        enum_name: "BindingValue",
-                        obtained: v[0].clone(),
-                    });
-                }
-            },
-            _other => {
-                let (val, _rest) = ObjectValue::from_asn1(v)?;
-                Self::Value(val)
-            },
-        };
-
-        Ok((binding_value, &v[1..]))
-    }
-}
-impl ToASN1 for BindingValue {
-    type Error = SnmpMessageError;
-
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
+impl Asn1BerCodable for BindingValue {
+    fn write_bytes<W: Write>(&self, write: W) -> Result<usize, SnmpMessageError> {
         match self {
-            Self::Unspecified => Ok(vec![ASN1Block::Null(0)]),
-            Self::Value(val) => val.to_asn1(),
-            Self::NoSuchObject|Self::NoSuchInstance|Self::EndOfMibView => {
-                let tag: u8 = match self {
-                    Self::NoSuchObject => 0,
-                    Self::NoSuchInstance => 1,
-                    Self::EndOfMibView => 2,
-                    _ => unreachable!(),
-                };
-                Ok(vec![ASN1Block::Unknown(ASN1Class::ContextSpecific, true, 0, BigUint::from(tag), Vec::new())])
+            Self::Unspecified => {
+                // regular NULL value
+                write_wrapped(write, Class::Universal, false, Tag::Null, &[])
+            },
+            Self::NoSuchObject => {
+                // NULL tagged with context-specific 0
+                write_wrapped(write, Class::ContextSpecific, false, Tag(0), &[])
+            },
+            Self::NoSuchInstance => {
+                // NULL tagged with context-specific 1
+                write_wrapped(write, Class::ContextSpecific, false, Tag(1), &[])
+            },
+            Self::EndOfMibView => {
+                // NULL tagged with context-specific 2
+                write_wrapped(write, Class::ContextSpecific, false, Tag(2), &[])
+            },
+            Self::Value(value) => {
+                // pass on
+                value.write_bytes(write)
             },
         }
+    }
+
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        alt((
+            // list the more complex options (tagged values) first!
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    0,
+                    |content, _hdr, _depth| parse_ber_null(content)
+                        .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error })),
+                )(bytes)
+                    .map(|(rest, _null)| (rest, Self::NoSuchObject))
+            ),
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    1,
+                    |content, _hdr, _depth| parse_ber_null(content)
+                        .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error })),
+                )(bytes)
+                    .map(|(rest, _null)| (rest, Self::NoSuchInstance))
+            ),
+
+            complete(|bytes|
+                parse_ber_class_tagged_implicit_g(
+                    Class::ContextSpecific,
+                    2,
+                    |content, _hdr, _depth| parse_ber_null(content)
+                        .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error })),
+                )(bytes)
+                    .map(|(rest, _null)| (rest, Self::EndOfMibView))
+            ),
+
+            |bytes| parse_ber_null(bytes)
+                .map(|(rest, _null)| (rest, Self::Unspecified))
+                .map_err(|err| err.map(|error| SnmpMessageError::Asn1Decoding { error })),
+
+            |bytes| ObjectValue::try_parse(bytes)
+                .map(|(rest, object_value)| (rest, Self::Value(object_value))),
+        ))(bytes)
     }
 }
 
@@ -931,138 +832,120 @@ impl ObjectValue {
         }
     }
 }
-impl FromASN1 for ObjectValue {
-    type Error = SnmpMessageError;
-
-    fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
-
-        let obj_value = match &v[0] {
-            ASN1Block::Integer(_offset, num) => {
-                let int_val: i32 = num.try_into()
-                    .map_err(|_| SnmpMessageError::IntegerPrimitiveRange {
-                        primitive_type: "i32",
-                        obtained: v[0].clone(),
-                    })?;
-                Self::Integer(int_val)
-            },
-            ASN1Block::OctetString(_offset, bytes) => Self::String(bytes.clone()),
-            ASN1Block::ObjectIdentifier(_offset, oid) => {
-                let snmp_oid: ObjectIdentifier = oid.try_into()
-                    .map_err(|error| SnmpMessageError::OidDecode {
-                        oid: oid.clone(),
-                        error,
-                    })?;
-                Self::ObjectId(snmp_oid)
-            },
-
-            ASN1Block::Unknown(cls, _constructed, _offset, tag, content_bytes) => {
-                SnmpMessageError::check_tag_class(*cls, ASN1Class::Application)?;
-
-                if tag == &BigUint::from(0u8) {
-                    // IP address
-                    if content_bytes.len() != 4 {
-                        return Err(SnmpMessageError::Length {
-                            expected: 4,
-                            obtained: content_bytes.len(),
-                        });
-                    }
-                    let bs_array: [u8; 4] = content_bytes.clone().try_into().unwrap();
-                    let addr = Ipv4Addr::from(bs_array);
-                    Self::IpAddress(addr)
-                } else if tag >= &BigUint::from(1u8) && tag <= &BigUint::from(3u8) {
-                    // 1 = Counter32, 2 = Gauge32/Unsigned32, 3 = TimeTicks
-                    let mut val_u32 = 0u32;
-                    for b in content_bytes {
-                        let b_u32: u32 = (*b).into();
-                        val_u32 = (val_u32 << 8) | b_u32;
-                    }
-
-                    if tag == &BigUint::from(1u8) {
-                        Self::Counter32(val_u32)
-                    } else if tag == &BigUint::from(2u8) {
-                        Self::Unsigned32(val_u32)
-                    } else if tag == &BigUint::from(3u8) {
-                        Self::TimeTicks(val_u32)
-                    } else {
-                        unreachable!();
-                    }
-                } else if tag == &BigUint::from(4u8) {
-                    // Opaque
-                    Self::Opaque(content_bytes.clone())
-                // 5 is unspecified
-                } else if tag == &BigUint::from(6u8) {
-                    // Counter64
-                    let mut val_u64 = 0u64;
-                    for b in content_bytes {
-                        let b_u64: u64 = (*b).into();
-                        val_u64 = (val_u64 << 8) | b_u64;
-                    }
-                    Self::Counter64(val_u64)
-                } else {
-                    return Err(SnmpMessageError::EnumRange {
-                        enum_name: "ObjectValue",
-                        obtained: v[0].clone(),
-                    });
-                }
-            },
-
-            other => {
-                return Err(SnmpMessageError::UnexpectedType {
-                    expected: ExpectedAsn1Type::AnySnmpValueType,
-                    obtained: other.clone(),
-                });
-            },
-        };
-
-        Ok((obj_value, &v[1..]))
-    }
-}
-impl ToASN1 for ObjectValue {
-    type Error = SnmpMessageError;
-
-    fn to_asn1_class(&self, _c: ASN1Class) -> Result<Vec<ASN1Block>, Self::Error> {
-        let mut ret = Vec::with_capacity(1);
-
+impl Asn1BerCodable for ObjectValue {
+    fn write_bytes<W: Write>(&self, write: W) -> Result<usize, SnmpMessageError> {
         match self {
-            Self::Integer(i) => ret.push(ASN1Block::from_i32(*i)),
-            Self::String(bs) => ret.push(ASN1Block::OctetString(0, bs.clone())),
-            Self::ObjectId(oid) => {
-                let oid_val: OID = oid.try_into()
-                    .map_err(|error| SnmpMessageError::OidEncode {
-                        oid: oid.clone(),
-                        error,
-                    })?;
-                ret.push(ASN1Block::ObjectIdentifier(0, oid_val));
+            Self::Integer(val) => {
+                // regular INTEGER
+                write_i128(write, (*val).into(), None, None)
             },
-
-            Self::IpAddress(addr) => ret.push(ASN1Block::Unknown(ASN1Class::Application, false, 0,
-                BigUint::from(0u8),
-                Vec::from(&addr.octets()[..]),
-            )),
-            Self::Counter32(i) => ret.push(ASN1Block::Unknown(ASN1Class::Application, false, 0,
-                BigUint::from(1u8),
-                BigInt::from(*i).to_signed_bytes_be(),
-            )),
-            Self::Unsigned32(i) => ret.push(ASN1Block::Unknown(ASN1Class::Application, false, 0,
-                BigUint::from(2u8),
-                BigInt::from(BigUint::from(*i)).to_signed_bytes_be(),
-            )),
-            Self::TimeTicks(i) => ret.push(ASN1Block::Unknown(ASN1Class::Application, false, 0,
-                BigUint::from(3u8),
-                BigInt::from(BigUint::from(*i)).to_signed_bytes_be(),
-            )),
-            Self::Opaque(bs) => ret.push(ASN1Block::Unknown(ASN1Class::Application, false, 0,
-                BigUint::from(4u8),
-                bs.clone(),
-            )),
-            Self::Counter64(i) => ret.push(ASN1Block::Unknown(ASN1Class::Application, false, 0,
-                BigUint::from(6u8),
-                BigInt::from(BigUint::from(*i)).to_signed_bytes_be(),
-            )),
+            Self::String(bs) => {
+                // regular OCTET STRING
+                write_octet_string(write, &bs, None, None)
+            },
+            Self::ObjectId(oid) => {
+                // regular OBJECT IDENTIFIER
+                write_oid(write, oid, None, None)
+            },
+            Self::IpAddress(ip) => {
+                // OCTET STRING with APPLICATION tag 0
+                write_octet_string(write, &ip.octets(), Some(Class::Application), Some(Tag(0)))
+            },
+            Self::Counter32(val) => {
+                // INTEGER with APPLICATION tag 1
+                write_u128(write, (*val).into(), Some(Class::Application), Some(Tag(1)))
+            },
+            Self::Unsigned32(val) => {
+                // INTEGER with APPLICATION tag 2
+                write_u128(write, (*val).into(), Some(Class::Application), Some(Tag(2)))
+            },
+            Self::TimeTicks(val) => {
+                // INTEGER with APPLICATION tag 3
+                write_u128(write, (*val).into(), Some(Class::Application), Some(Tag(3)))
+            },
+            Self::Opaque(bs) => {
+                // OCTET STRING with APPLICATION tag 4
+                write_octet_string(write, bs, Some(Class::Application), Some(Tag(4)))
+            },
+            Self::Counter64(val) => {
+                // INTEGER with APPLICATION tag 6
+                write_u128(write, (*val).into(), Some(Class::Application), Some(Tag(6)))
+            },
         }
+    }
 
-        Ok(ret)
+    fn try_parse(bytes: &[u8]) -> Result<(&[u8], Self), nom::Err<SnmpMessageError>> {
+        alt((
+            // application-specific variants first!
+
+            // IpAddress
+            complete(|bytes|
+                parse_ber_octetstring_class_tag(bytes, Class::Application, 0)
+                    .and_then(|(rest, octet_string)| {
+                        if octet_string.len() != 4 {
+                            Err(nom::Err::Error(SnmpMessageError::Length { expected: 4, obtained: octet_string.len() }))
+                        } else {
+                            let octets: [u8; 4] = octet_string.try_into().unwrap();
+                            Ok((rest, Self::IpAddress(octets.into())))
+                        }
+                    })
+            ),
+
+            // Counter32
+            complete(|bytes|
+                parse_ber_integer_u32_class_tag(bytes, Class::Application, 1)
+                    .map(|(rest, val)| (rest, Self::Counter32(val)))
+            ),
+
+            // Unsigned32 (= Gauge32)
+            complete(|bytes|
+                parse_ber_integer_u32_class_tag(bytes, Class::Application, 2)
+                    .map(|(rest, val)| (rest, Self::Unsigned32(val)))
+            ),
+
+            // TimeTicks
+            complete(|bytes|
+                parse_ber_integer_u32_class_tag(bytes, Class::Application, 3)
+                    .map(|(rest, val)| (rest, Self::TimeTicks(val)))
+            ),
+
+            // Opaque
+            complete(|bytes|
+                parse_ber_octetstring_class_tag(bytes, Class::Application, 4)
+                    .map(|(rest, octet_string)| (rest, Self::Opaque(Vec::from(octet_string)))
+            )),
+
+            // [APPLICATION 5] used to be an OSI NSAP address in RFC1442, but was removed in RFC1902
+
+            // Counter64
+            complete(|bytes|
+                parse_ber_integer_u64_class_tag(bytes, Class::Application, 6)
+                    .map(|(rest, val)| (rest, Self::Counter64(val)))
+            ),
+
+            // [APPLICATION 7] used to be UInteger32 in RFC1442, but was removed in RFC1902
+            // (what's the point if we already have Counter32 and Unsigned32?)
+
+            // global variants next
+
+            // Integer
+            complete(|bytes|
+                parse_ber_integer_i32(bytes)
+                    .map(|(rest, int)| (rest, Self::Integer(int)))
+            ),
+
+            // String
+            complete(|bytes|
+                parse_ber_octetstring(bytes)
+                    .map(|(rest, octet_string)| (rest, Self::String(Vec::from(octet_string))))
+            ),
+
+            // ObjectId
+            complete(|bytes|
+                parse_ber_oid(bytes)
+                    .map(|(rest, oid)| (rest, Self::ObjectId(oid)))
+            ),
+        ))(bytes)
     }
 }
 
@@ -1070,7 +953,6 @@ impl ToASN1 for ObjectValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simple_asn1::{der_decode, der_encode};
 
     fn gimme_int(bind: &VariableBinding) -> i32 {
         match &bind.value {
@@ -1129,6 +1011,192 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_integer_object_value() {
+        let bytes: Vec<u8> = vec![0x02, 0x01, 0x04];
+
+        let (rest, asn1) = ObjectValue::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        assert_eq!(asn1, ObjectValue::Integer(4));
+    }
+
+    #[test]
+    fn test_decode_integer_binding_value() {
+        let bytes: Vec<u8> = vec![0x02, 0x01, 0x04];
+
+        let (rest, asn1) = BindingValue::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        assert_eq!(asn1, BindingValue::Value(ObjectValue::Integer(4)));
+    }
+
+    #[test]
+    fn test_decode_variable_binding() {
+        let bytes: Vec<u8> = vec![
+            0x30, 0x13, 0x06, 0x0E, 0x28, 0xC4, 0x62, 0x01,
+            0x01, 0x02, 0x01, 0x04, 0x01, 0x01, 0x04, 0x00,
+            0x01, 0x5F, 0x02, 0x01, 0x04,
+        ];
+
+        let (rest, asn1) = VariableBinding::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        assert_eq!(asn1.name, "1.0.8802.1.1.2.1.4.1.1.4.0.1.95".parse().unwrap());
+        assert_eq!(asn1.value, BindingValue::Value(ObjectValue::Integer(4)));
+    }
+
+    #[test]
+    fn test_decode_inner_pdu() {
+        let bytes: Vec<u8> = vec![
+            0x02, 0x04, 0x1c, 0x68, 0x3b, 0x44, 0x02, 0x01,
+            0x00, 0x02, 0x01, 0x00, 0x30, 0x16, 0x30, 0x14,
+            0x06, 0x0f, 0x28, 0xc4, 0x62, 0x01, 0x01, 0x02,
+            0x01, 0x04, 0x01, 0x01, 0x04, 0x00, 0x81, 0x42,
+            0x08, 0x02, 0x01, 0x04,
+        ];
+
+        let (rest, asn1) = InnerPdu::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        assert_eq!(asn1.request_id, 476592964);
+        assert_eq!(asn1.error_status, ErrorStatus::NoError);
+        assert_eq!(asn1.error_index, 0);
+        assert_eq!(asn1.variable_bindings[0].name, "1.0.8802.1.1.2.1.4.1.1.4.0.194.8".parse().unwrap());
+        assert_eq!(asn1.variable_bindings[0].value, BindingValue::Value(ObjectValue::Integer(4)));
+    }
+
+    #[test]
+    fn test_decode_inner_pdu_10() {
+        let bytes: Vec<u8> = vec![
+            0x02, 0x01, 0x01, 0x02,
+            0x01, 0x00, 0x02, 0x01, 0x00,
+            0x30, 0x82, 0x01, 0x87, 0x30, 0x81, 0xca, 0x06,
+            0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01,
+            0x00, 0x04, 0x81, 0xbd, 0x43, 0x69, 0x73, 0x63,
+            0x6f, 0x20, 0x4e, 0x58, 0x2d, 0x4f, 0x53, 0x28,
+            0x74, 0x6d, 0x29, 0x20, 0x6e, 0x35, 0x30, 0x30,
+            0x30, 0x2c, 0x20, 0x53, 0x6f, 0x66, 0x74, 0x77,
+            0x61, 0x72, 0x65, 0x20, 0x28, 0x6e, 0x35, 0x30,
+            0x30, 0x30, 0x2d, 0x75, 0x6b, 0x39, 0x29, 0x2c,
+            0x20, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e,
+            0x20, 0x36, 0x2e, 0x30, 0x28, 0x32, 0x29, 0x4e,
+            0x32, 0x28, 0x34, 0x29, 0x2c, 0x20, 0x52, 0x45,
+            0x4c, 0x45, 0x41, 0x53, 0x45, 0x20, 0x53, 0x4f,
+            0x46, 0x54, 0x57, 0x41, 0x52, 0x45, 0x20, 0x43,
+            0x6f, 0x70, 0x79, 0x72, 0x69, 0x67, 0x68, 0x74,
+            0x20, 0x28, 0x63, 0x29, 0x20, 0x32, 0x30, 0x30,
+            0x32, 0x2d, 0x32, 0x30, 0x31, 0x32, 0x20, 0x62,
+            0x79, 0x20, 0x43, 0x69, 0x73, 0x63, 0x6f, 0x20,
+            0x53, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x73, 0x2c,
+            0x20, 0x49, 0x6e, 0x63, 0x2e, 0x20, 0x44, 0x65,
+            0x76, 0x69, 0x63, 0x65, 0x20, 0x4d, 0x61, 0x6e,
+            0x61, 0x67, 0x65, 0x72, 0x20, 0x56, 0x65, 0x72,
+            0x73, 0x69, 0x6f, 0x6e, 0x20, 0x36, 0x2e, 0x32,
+            0x28, 0x31, 0x29, 0x2c, 0x20, 0x20, 0x43, 0x6f,
+            0x6d, 0x70, 0x69, 0x6c, 0x65, 0x64, 0x20, 0x32,
+            0x2f, 0x32, 0x34, 0x2f, 0x32, 0x30, 0x31, 0x34,
+            0x20, 0x31, 0x34, 0x3a, 0x30, 0x30, 0x3a, 0x30,
+            0x30, 0x30, 0x18, 0x06, 0x08, 0x2b, 0x06, 0x01,
+            0x02, 0x01, 0x01, 0x02, 0x00, 0x06, 0x0c, 0x2b,
+            0x06, 0x01, 0x04, 0x01, 0x09, 0x0c, 0x03, 0x01,
+            0x03, 0x87, 0x70, 0x30, 0x11, 0x06, 0x08, 0x2b,
+            0x06, 0x01, 0x02, 0x01, 0x01, 0x03, 0x00, 0x43,
+            0x05, 0x00, 0x99, 0xe6, 0x9b, 0xc5, 0x30, 0x0f,
+            0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01,
+            0x04, 0x00, 0x04, 0x03, 0x4b, 0x4f, 0x4d, 0x30,
+            0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01,
+            0x01, 0x05, 0x00, 0x04, 0x08, 0x73, 0x77, 0x2d,
+            0x64, 0x2d, 0x73, 0x6e, 0x31, 0x30, 0x13, 0x06,
+            0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x06,
+            0x00, 0x04, 0x07, 0x44, 0x43, 0x30, 0x32, 0x4d,
+            0x30, 0x32, 0x30, 0x0d, 0x06, 0x08, 0x2b, 0x06,
+            0x01, 0x02, 0x01, 0x01, 0x07, 0x00, 0x02, 0x01,
+            0x46, 0x30, 0x11, 0x06, 0x08, 0x2b, 0x06, 0x01,
+            0x02, 0x01, 0x01, 0x08, 0x00, 0x43, 0x05, 0x00,
+            0xff, 0xff, 0xff, 0x7e, 0x30, 0x14, 0x06, 0x0a,
+            0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x09, 0x01,
+            0x02, 0x01, 0x06, 0x06, 0x2b, 0x06, 0x01, 0x06,
+            0x03, 0x01, 0x30, 0x17, 0x06, 0x0a, 0x2b, 0x06,
+            0x01, 0x02, 0x01, 0x01, 0x09, 0x01, 0x02, 0x02,
+            0x06, 0x09, 0x2b, 0x06, 0x01, 0x06, 0x03, 0x10,
+            0x02, 0x02, 0x01,
+        ];
+
+        let (rest, asn1) = InnerPdu::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        assert_eq!(asn1.request_id, 1);
+        assert_eq!(asn1.error_status, ErrorStatus::NoError);
+        assert_eq!(asn1.error_index, 0);
+
+        assert_eq!(asn1.variable_bindings[0].name, "1.3.6.1.2.1.1.1.0".parse().unwrap());
+        let string0 = gimme_octets(&asn1.variable_bindings[0]);
+        assert_eq!(string0, b"Cisco NX-OS(tm) n5000, Software (n5000-uk9), Version 6.0(2)N2(4), RELEASE SOFTWARE Copyright (c) 2002-2012 by Cisco Systems, Inc. Device Manager Version 6.2(1),  Compiled 2/24/2014 14:00:00");
+
+        assert_eq!(asn1.variable_bindings[1].name, "1.3.6.1.2.1.1.2.0".parse().unwrap());
+        let oid1 = gimme_oid(&asn1.variable_bindings[1]);
+        assert_eq!(oid1, "1.3.6.1.4.1.9.12.3.1.3.1008".parse().unwrap());
+
+        assert_eq!(asn1.variable_bindings[2].name, "1.3.6.1.2.1.1.3.0".parse().unwrap());
+        let time2 = gimme_time(&asn1.variable_bindings[2]);
+        assert_eq!(time2, 0x99E69BC5);
+    }
+
+    #[test]
+    fn test_decode_pdu() {
+        let bytes: Vec<u8> = vec![
+            0xa2, 0x24, 0x02, 0x04, 0x1c, 0x68, 0x3b, 0x44,
+            0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x16,
+            0x30, 0x14, 0x06, 0x0f, 0x28, 0xc4, 0x62, 0x01,
+            0x01, 0x02, 0x01, 0x04, 0x01, 0x01, 0x04, 0x00,
+            0x81, 0x42, 0x08, 0x02, 0x01, 0x04,
+        ];
+
+        let (rest, asn1) = Snmp2cPdu::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        match asn1 {
+            Snmp2cPdu::Response(resp) => {
+                assert_eq!(resp.request_id, 476592964);
+                assert_eq!(resp.error_status, ErrorStatus::NoError);
+                assert_eq!(resp.error_index, 0);
+                assert_eq!(resp.variable_bindings[0].name, "1.0.8802.1.1.2.1.4.1.1.4.0.194.8".parse().unwrap());
+                assert_eq!(resp.variable_bindings[0].value, BindingValue::Value(ObjectValue::Integer(4)));
+            },
+            other => panic!("unexpected PDU {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_message() {
+        let bytes: Vec<u8> = vec![
+            0x30, 0x30, 0x02, 0x01, 0x01, 0x04, 0x05,
+            0x41, 0x69, 0x74, 0x68, 0x39,
+            0xa2, 0x24, 0x02, 0x04, 0x1c, 0x68, 0x3b, 0x44,
+            0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x16,
+            0x30, 0x14, 0x06, 0x0f, 0x28, 0xc4, 0x62, 0x01,
+            0x01, 0x02, 0x01, 0x04, 0x01, 0x01, 0x04, 0x00,
+            0x81, 0x42, 0x08, 0x02, 0x01, 0x04,
+        ];
+
+        let (rest, asn1) = Snmp2cMessage::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
+        assert_eq!(asn1.version, 1);
+        assert_eq!(asn1.community, b"Aith9");
+        match asn1.pdu {
+            Snmp2cPdu::Response(resp) => {
+                assert_eq!(resp.request_id, 476592964);
+                assert_eq!(resp.error_status, ErrorStatus::NoError);
+                assert_eq!(resp.error_index, 0);
+                assert_eq!(resp.variable_bindings[0].name, "1.0.8802.1.1.2.1.4.1.1.4.0.194.8".parse().unwrap());
+                assert_eq!(resp.variable_bindings[0].value, BindingValue::Value(ObjectValue::Integer(4)));
+            },
+            other => panic!("unexpected PDU {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_decode1() {
         let bytes: Vec<u8> = vec![
              48, 129, 238,   2,   1,   1,   4,   5,  70, 113,  97, 116, 101, 162, 129, 225,
@@ -1149,7 +1217,9 @@ mod tests {
               5,
         ];
 
-        let asn1: Snmp2cMessage = der_decode(&bytes).unwrap();
+        let (rest, asn1) = Snmp2cMessage::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
         assert_eq!(asn1.version, 1);
         assert_eq!(asn1.community, b"Fqate");
 
@@ -1237,7 +1307,7 @@ mod tests {
                 ],
             }),
         };
-        let bytes = der_encode(&message).unwrap();
+        let bytes = message.to_bytes().unwrap();
 
         let expected_bytes: Vec<u8> = vec![
              48, 129, 238,   2,   1,   1,   4,   5,  70, 113,  97, 116, 101, 162, 129, 225,
@@ -1292,7 +1362,9 @@ mod tests {
               6,   3,  16,   2,   2,   1,
         ];
 
-        let asn1: Snmp2cMessage = der_decode(&bytes).unwrap();
+        let (rest, asn1) = Snmp2cMessage::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
         assert_eq!(asn1.version, 1);
         assert_eq!(asn1.community, b"9v79I");
 
@@ -1380,7 +1452,7 @@ mod tests {
                 ],
             }),
         };
-        let bytes = der_encode(&message).unwrap();
+        let bytes = message.to_bytes().unwrap();
 
         let expected_bytes: Vec<u8> = vec![
              48, 130,   1, 162,   2,   1,   1,   4,   5,  57, 118,  55,  57,  73, 162, 130,
@@ -1439,7 +1511,9 @@ mod tests {
               6,   1,   0,   2,   4,  36,  24,   7,  18,
         ];
 
-        let asn1: Snmp2cMessage = der_decode(&bytes).unwrap();
+        let (rest, asn1) = Snmp2cMessage::try_parse(&bytes).unwrap();
+        assert_eq!(rest, b"");
+
         assert_eq!(asn1.version, 1);
         assert_eq!(asn1.community, b"readonly");
 
@@ -1527,7 +1601,7 @@ mod tests {
                 ],
             }),
         };
-        let bytes = der_encode(&message).unwrap();
+        let bytes = message.to_bytes().unwrap();
 
         let expected_bytes: Vec<u8> = vec![
              48, 130,   1,  53,   2,   1,   1,   4,   8, 114, 101,  97, 100, 111, 110, 108,

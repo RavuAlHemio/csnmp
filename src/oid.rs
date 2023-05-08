@@ -8,8 +8,6 @@ use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 
-use simple_asn1::{BigUint, OID};
-
 
 /// The maximum number of sub-identifiers (numbers) in an object identifier.
 ///
@@ -405,42 +403,6 @@ impl TryFrom<&[u32]> for ObjectIdentifier {
             length: value.len(),
             sub_identifiers,
         })
-    }
-}
-impl TryFrom<&OID> for ObjectIdentifier {
-    type Error = ObjectIdentifierConversionError;
-
-    fn try_from(value: &OID) -> Result<Self, Self::Error> {
-        let vec: Vec<&BigUint> = value.as_vec().unwrap();
-        let mut sub_identifiers = [0u32; MAX_SUB_IDENTIFIER_COUNT];
-
-        for (index, val) in vec.iter().enumerate() {
-            let val_u32 = (*val).try_into()
-                .map_err(|_| ObjectIdentifierConversionError::ValueRange { index })?;
-            sub_identifiers[index] = val_u32;
-        }
-
-        Ok(Self {
-            length: vec.len(),
-            sub_identifiers,
-        })
-    }
-}
-impl TryFrom<&ObjectIdentifier> for OID {
-    type Error = ObjectIdentifierConversionError;
-
-    fn try_from(value: &ObjectIdentifier) -> Result<Self, Self::Error> {
-        if value.len() < ABS_MIN_SUB_IDENTIFIER_COUNT {
-            return Err(ObjectIdentifierConversionError::TooShort {
-                length: value.len(),
-            });
-        }
-        Ok(OID::new(
-            value.as_slice()
-                .iter()
-                .map(|&i| BigUint::from(i))
-                .collect()
-        ))
     }
 }
 
