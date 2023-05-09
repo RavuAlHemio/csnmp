@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 
 use csnmp::{ObjectIdentifier, Snmp2cClient};
+use tracing_subscriber;
 
 
 #[global_allocator]
@@ -10,6 +11,8 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 
 async fn run() -> ExitCode {
+    tracing_subscriber::fmt::init();
+
     let args: Vec<String> = args().collect();
     if args.len() != 3 {
         eprintln!("Usage: bulkwalk IPADDR COMMUNITY");
