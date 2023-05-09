@@ -14,8 +14,8 @@ async fn run() -> ExitCode {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: bulkwalk IPADDR COMMUNITY");
+    if args.len() != 4 {
+        eprintln!("Usage: bulkwalk IPADDR COMMUNITY OID");
         return ExitCode::FAILURE;
     }
 
@@ -23,16 +23,19 @@ async fn run() -> ExitCode {
         .expect("failed to parse IP address");
     let sock_addr = SocketAddr::from((ip_addr, 161));
 
+    let community = Vec::from(args[2].as_bytes());
+    let top_oid: ObjectIdentifier = args[3].parse().expect("failed to parse OID");
+
     let client_res = Snmp2cClient::new(
         sock_addr,
-        Vec::from(args[2].as_bytes()),
+        community,
         Some("0.0.0.0:0".parse().unwrap()),
         None,
     ).await;
     let client = client_res.expect("failed to create SNMP client");
 
     let results_res = client.walk_bulk(
-        ObjectIdentifier::try_from(&[1, 3, 6, 1, 2, 1, 1][..]).unwrap(),
+        top_oid,
         0,
         10,
     ).await;
