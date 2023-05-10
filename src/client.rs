@@ -120,7 +120,7 @@ impl Snmp2cClient {
 
     /// Obtains the value for a single SNMP object.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get(&self, oid: ObjectIdentifier) -> Result<ObjectValue, SnmpClientError> {
+    pub async fn get(&self, oid: &ObjectIdentifier) -> Result<ObjectValue, SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.get(oid, request_id, &options).await
@@ -128,7 +128,7 @@ impl Snmp2cClient {
 
     /// Obtains the value for multiple specific SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+    pub async fn get_multiple<'a, I: IntoIterator<Item = &'a ObjectIdentifier> + fmt::Debug>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.get_multiple(oids, request_id, &options).await
@@ -137,7 +137,7 @@ impl Snmp2cClient {
     /// Obtains the value for the next object in the tree relative to the given OID. This is a
     /// low-level operation, used as a building block for [`walk`].
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_next(&self, prev_oid: ObjectIdentifier) -> Result<(ObjectIdentifier, ObjectValue), SnmpClientError> {
+    pub async fn get_next(&self, prev_oid: &ObjectIdentifier) -> Result<(ObjectIdentifier, ObjectValue), SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.get_next(prev_oid, request_id, &options).await
@@ -146,7 +146,7 @@ impl Snmp2cClient {
     /// Obtains the values for the next objects in the tree relative to the given OID. This is a
     /// low-level operation, used as a building block for [`walk_bulk`].
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_bulk(&self, prev_oid: ObjectIdentifier, non_repeaters: u32, max_repetitions: u32) -> Result<GetBulkResult, SnmpClientError> {
+    pub async fn get_bulk(&self, prev_oid: &ObjectIdentifier, non_repeaters: u32, max_repetitions: u32) -> Result<GetBulkResult, SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.get_bulk(prev_oid, non_repeaters, max_repetitions, request_id, &options).await
@@ -154,7 +154,7 @@ impl Snmp2cClient {
 
     /// Sends a trap message, informing a management station about one or more events.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn trap<B: fmt::Debug + Iterator<Item = (ObjectIdentifier, ObjectValue)>>(&self, bindings: B) -> Result<(), SnmpClientError> {
+    pub async fn trap<'a, B: fmt::Debug + Iterator<Item = (&'a ObjectIdentifier, &'a ObjectValue)>>(&self, bindings: B) -> Result<(), SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.trap(bindings, request_id, &options).await
@@ -163,7 +163,7 @@ impl Snmp2cClient {
     /// Sends an Inform message, informing a management station about one or more events. In
     /// contrast to a trap message, Inform messages incur a response.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn inform<B: fmt::Debug + Iterator<Item = (ObjectIdentifier, ObjectValue)>>(&self, bindings: B) -> Result<GetBulkResult, SnmpClientError> {
+    pub async fn inform<'a, B: fmt::Debug + Iterator<Item = (&'a ObjectIdentifier, &'a ObjectValue)>>(&self, bindings: B) -> Result<GetBulkResult, SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.inform(bindings, request_id, &options).await
@@ -176,7 +176,7 @@ impl Snmp2cClient {
     /// Unless the agent you are querying has issues with the Get-Bulk operation, using
     /// [`walk_bulk`] is far more efficient.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn walk(&self, top_oid: ObjectIdentifier) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+    pub async fn walk(&self, top_oid: &ObjectIdentifier) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         // request_id is increased multiple times; cope with that
         let options = self.get_operation_options();
         let mut request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
@@ -197,7 +197,7 @@ impl Snmp2cClient {
     /// and provide different results to a [`get_bulk`] operation than to an equivalent sequence of
     /// [`get_next`] operations. Therefore, [`walk`] is still provided.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn walk_bulk(&self, top_oid: ObjectIdentifier, non_repeaters: u32, max_repetitions: u32) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+    pub async fn walk_bulk(&self, top_oid: &ObjectIdentifier, non_repeaters: u32, max_repetitions: u32) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         // request_id is increased multiple times; cope with that
         let options = self.get_operation_options();
         let mut request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
@@ -521,7 +521,7 @@ impl LowLevelSnmp2cClient {
     fn process_bulk_results(
         &self,
         pdu: InnerPdu,
-        prev_oid_opt: Option<ObjectIdentifier>,
+        prev_oid_opt: Option<&ObjectIdentifier>,
         ensure_increasing: bool,
     ) -> Result<GetBulkResult, SnmpClientError> {
         let mut values = BTreeMap::new();
@@ -530,29 +530,29 @@ impl LowLevelSnmp2cClient {
 
         for binding in &pdu.variable_bindings {
             if let Some(prev_oid) = prev_oid_opt {
-                if binding.name <= prev_oid {
-                    return Err(SnmpClientError::PrecedingValue { previous_oid: prev_oid, obtained: pdu.variable_bindings });
+                if &binding.name <= prev_oid {
+                    return Err(SnmpClientError::PrecedingValue { previous_oid: prev_oid.clone(), obtained: pdu.variable_bindings });
                 }
             }
 
             if ensure_increasing {
-                if let Some(last_oid) = last_oid_opt {
-                    if binding.name <= last_oid {
+                if let Some(last_oid) = &last_oid_opt {
+                    if &binding.name <= last_oid {
                         return Err(SnmpClientError::NonIncreasingValue {
-                            previous_oid: last_oid,
-                            next_oid: binding.name,
+                            previous_oid: last_oid.clone(),
+                            next_oid: binding.name.clone(),
                             obtained: pdu.variable_bindings,
                         });
                     }
                 }
-                last_oid_opt = Some(binding.name);
+                last_oid_opt = Some(binding.name.clone());
             }
 
             match &binding.value {
                 BindingValue::Value(v) => {
-                    let existing_value = values.insert(binding.name, v.clone());
+                    let existing_value = values.insert(binding.name.clone(), v.clone());
                     if existing_value.is_some() {
-                        return Err(SnmpClientError::DuplicateValue { oid: binding.name, obtained: pdu.variable_bindings });
+                        return Err(SnmpClientError::DuplicateValue { oid: binding.name.clone(), obtained: pdu.variable_bindings });
                     }
                 },
                 BindingValue::EndOfMibView => {
@@ -572,7 +572,7 @@ impl LowLevelSnmp2cClient {
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get(
         &self,
-        oid: ObjectIdentifier,
+        oid: &ObjectIdentifier,
         request_id: i32,
         options: &OperationOptions,
     ) -> Result<ObjectValue, SnmpClientError> {
@@ -586,7 +586,7 @@ impl LowLevelSnmp2cClient {
                 error_index: 0,
                 variable_bindings: vec![
                     VariableBinding {
-                        name: oid,
+                        name: oid.clone(),
                         value: BindingValue::Unspecified,
                     },
                 ],
@@ -604,8 +604,8 @@ impl LowLevelSnmp2cClient {
         }
         let binding = pdu.variable_bindings.remove(0);
 
-        if binding.name != oid {
-            return Err(SnmpClientError::UnexpectedValue { expected: oid, obtained: vec![binding] });
+        if &binding.name != oid {
+            return Err(SnmpClientError::UnexpectedValue { expected: oid.clone(), obtained: vec![binding] });
         }
 
         let value = match binding.value {
@@ -618,7 +618,7 @@ impl LowLevelSnmp2cClient {
 
     /// Obtains values for multiple specified SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(
+    pub async fn get_multiple<'a, I: IntoIterator<Item = &'a ObjectIdentifier> + fmt::Debug>(
         &self,
         oids: I,
         request_id: i32,
@@ -628,7 +628,7 @@ impl LowLevelSnmp2cClient {
         let variable_bindings: Vec<VariableBinding> = oids
             .into_iter()
             .map(|oid| VariableBinding {
-                name: oid,
+                name: oid.clone(),
                 value: BindingValue::Unspecified,
             })
             .collect();
@@ -671,7 +671,7 @@ impl LowLevelSnmp2cClient {
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get_next(
         &self,
-        prev_oid: ObjectIdentifier,
+        prev_oid: &ObjectIdentifier,
         request_id: i32,
         options: &OperationOptions,
     ) -> Result<(ObjectIdentifier, ObjectValue), SnmpClientError> {
@@ -685,7 +685,7 @@ impl LowLevelSnmp2cClient {
                 error_index: 0,
                 variable_bindings: vec![
                     VariableBinding {
-                        name: prev_oid,
+                        name: prev_oid.clone(),
                         value: BindingValue::Unspecified,
                     },
                 ],
@@ -704,8 +704,8 @@ impl LowLevelSnmp2cClient {
         let binding = pdu.variable_bindings.remove(0);
 
         // the bindings' OIDs must all be greater than the one given to this operation
-        if binding.name <= prev_oid {
-            return Err(SnmpClientError::PrecedingValue { previous_oid: prev_oid, obtained: vec![binding] });
+        if &binding.name <= prev_oid {
+            return Err(SnmpClientError::PrecedingValue { previous_oid: prev_oid.clone(), obtained: vec![binding] });
         }
 
         let value = match binding.value {
@@ -721,7 +721,7 @@ impl LowLevelSnmp2cClient {
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get_bulk(
         &self,
-        prev_oid: ObjectIdentifier,
+        prev_oid: &ObjectIdentifier,
         non_repeaters: u32,
         max_repetitions: u32,
         request_id: i32,
@@ -737,7 +737,7 @@ impl LowLevelSnmp2cClient {
                 max_repetitions,
                 variable_bindings: vec![
                     VariableBinding {
-                        name: prev_oid,
+                        name: prev_oid.clone(),
                         value: BindingValue::Unspecified,
                     },
                 ],
@@ -755,7 +755,7 @@ impl LowLevelSnmp2cClient {
 
     /// Sends a trap message, informing a management station about one or more events.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn trap<B: fmt::Debug + Iterator<Item = (ObjectIdentifier, ObjectValue)>>(
+    pub async fn trap<'a, B: fmt::Debug + Iterator<Item = (&'a ObjectIdentifier, &'a ObjectValue)>>(
         &self,
         bindings: B,
         request_id: i32,
@@ -764,8 +764,8 @@ impl LowLevelSnmp2cClient {
         // prepare Trap message
         let variable_bindings: Vec<VariableBinding> = bindings
             .map(|(name, value)| VariableBinding {
-                name,
-                value: BindingValue::Value(value),
+                name: name.clone(),
+                value: BindingValue::Value(value.clone()),
             })
             .collect();
         let trap_message = Snmp2cMessage {
@@ -790,7 +790,7 @@ impl LowLevelSnmp2cClient {
     /// Sends an Inform message, informing a management station about one or more events. In
     /// contrast to a trap message, Inform messages incur a response.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn inform<B: fmt::Debug + Iterator<Item = (ObjectIdentifier, ObjectValue)>>(
+    pub async fn inform<'a, B: fmt::Debug + Iterator<Item = (&'a ObjectIdentifier, &'a ObjectValue)>>(
         &self,
         bindings: B,
         request_id: i32,
@@ -799,8 +799,8 @@ impl LowLevelSnmp2cClient {
         // prepare Inform message
         let variable_bindings: Vec<VariableBinding> = bindings
             .map(|(name, value)| VariableBinding {
-                name,
-                value: BindingValue::Value(value),
+                name: name.clone(),
+                value: BindingValue::Value(value.clone()),
             })
             .collect();
         let inform_message = Snmp2cMessage {
@@ -833,7 +833,7 @@ impl LowLevelSnmp2cClient {
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn walk(
         &self,
-        top_oid: ObjectIdentifier,
+        top_oid: &ObjectIdentifier,
         request_id: &mut i32,
         options: &OperationOptions,
     ) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
@@ -843,7 +843,7 @@ impl LowLevelSnmp2cClient {
         // (because get_next starts at the OID *after* it)
         match self.get(top_oid, *request_id, options).await {
             Ok(value) => {
-                ret.insert(top_oid, value);
+                ret.insert(top_oid.clone(), value);
             },
             Err(SnmpClientError::FailedBinding { binding }) => {
                 if let BindingValue::NoSuchInstance = binding.value {
@@ -858,16 +858,16 @@ impl LowLevelSnmp2cClient {
         }
 
         // keep calling get_next until the OID is no longer under top_oid
-        let mut cur_oid = top_oid;
+        let mut cur_oid = top_oid.clone();
         loop {
             *request_id += 1;
-            match self.get_next(cur_oid, *request_id, options).await {
+            match self.get_next(&cur_oid, *request_id, options).await {
                 Ok((next_oid, next_value)) => {
                     if !top_oid.is_prefix_of_or_equal(&next_oid) {
                         // we have fallen out of our subtree; stop here
                         break;
                     }
-                    ret.insert(next_oid, next_value);
+                    ret.insert(next_oid.clone(), next_value);
                     cur_oid = next_oid;
                 },
                 Err(SnmpClientError::FailedBinding { binding }) => {
@@ -899,7 +899,7 @@ impl LowLevelSnmp2cClient {
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn walk_bulk(
         &self,
-        top_oid: ObjectIdentifier,
+        top_oid: &ObjectIdentifier,
         non_repeaters: u32,
         max_repetitions: u32,
         request_id: &mut i32,
@@ -908,9 +908,9 @@ impl LowLevelSnmp2cClient {
         let mut ret = BTreeMap::new();
 
         // keep calling get_bulk until one of the OIDs is no longer under top_oid
-        let mut cur_oid = top_oid;
+        let mut cur_oid = top_oid.clone();
         loop {
-            let get_bulk_result = self.get_bulk(cur_oid, non_repeaters, max_repetitions, *request_id, options).await;
+            let get_bulk_result = self.get_bulk(&cur_oid, non_repeaters, max_repetitions, *request_id, options).await;
             *request_id += 1;
             match get_bulk_result {
                 Ok(get_bulk_result) => {
@@ -921,7 +921,7 @@ impl LowLevelSnmp2cClient {
                             out_of_tree = true;
                             break;
                         }
-                        ret.insert(oid, value);
+                        ret.insert(oid.clone(), value);
                         cur_oid = oid;
                     }
                     if out_of_tree {
@@ -949,7 +949,7 @@ impl LowLevelSnmp2cClient {
             *request_id += 1;
             match get_result {
                 Ok(value) => {
-                    ret.insert(top_oid, value);
+                    ret.insert(top_oid.clone(), value);
                 },
                 Err(SnmpClientError::FailedBinding { binding }) => {
                     if let BindingValue::NoSuchInstance = binding.value {

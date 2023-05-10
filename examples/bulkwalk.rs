@@ -35,7 +35,7 @@ async fn run() -> ExitCode {
     let client = client_res.expect("failed to create SNMP client");
 
     let results_res = client.walk_bulk(
-        top_oid,
+        &top_oid,
         0,
         10,
     ).await;

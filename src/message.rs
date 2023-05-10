@@ -14,7 +14,7 @@ use nom::combinator::complete;
 use nom::multi::many0;
 
 use crate::asn1encode::{write_i128, write_octet_string, write_wrapped, write_u128, write_oid};
-use crate::oid::{MAX_SUB_IDENTIFIER_COUNT, ObjectIdentifier};
+use crate::oid::ObjectIdentifier;
 
 
 /// Version value stored in every SNMP2c message.
@@ -252,22 +252,20 @@ fn parse_ber_oid(bytes: &[u8]) -> Result<(&[u8], ObjectIdentifier), nom::Err<Snm
     let oid_ber = name_ber.as_oid()
         .map_err(|error| nom::Err::Error(error.into()))?;
 
-    let mut oid_array = [0u32; MAX_SUB_IDENTIFIER_COUNT];
+    let mut oid_vec = Vec::new();
     let oid_iter = match oid_ber.iter() {
         Some(oi) => oi,
         None => return Err(nom::Err::Error(SnmpMessageError::OidDecodeArcNotU32 { index: None })),
     };
-    let mut arc_count = 0;
-    for (index, arc_u64) in oid_iter.enumerate() {
+    for arc_u64 in oid_iter {
         let arc_u32 = match arc_u64.try_into() {
             Ok(au) => au,
             Err(_) => return Err(nom::Err::Error(SnmpMessageError::OidDecodeArcNotU32 { index: None })),
         };
-        oid_array[index] = arc_u32;
-        arc_count += 1;
+        oid_vec.push(arc_u32);
     }
 
-    let oid = ObjectIdentifier::new(arc_count, oid_array);
+    let oid = ObjectIdentifier::new(oid_vec);
     Ok((rest, oid))
 }
 
@@ -773,9 +771,9 @@ impl ObjectValue {
 
     /// Returns [`Some(ObjectIdentifier)`] if this `ObjectValue` is an
     /// [`ObjectId`][ObjectValue::ObjectId]; otherwise, returns [`None`].
-    pub fn as_oid(&self) -> Option<ObjectIdentifier> {
+    pub fn as_oid(&self) -> Option<&ObjectIdentifier> {
         match self {
-            Self::ObjectId(o) => Some(*o),
+            Self::ObjectId(o) => Some(o),
             _ => None,
         }
     }
@@ -968,9 +966,9 @@ mod tests {
         }
     }
 
-    fn gimme_oid(bind: &VariableBinding) -> ObjectIdentifier {
+    fn gimme_oid(bind: &VariableBinding) -> &ObjectIdentifier {
         match &bind.value {
-            BindingValue::Value(ObjectValue::ObjectId(oid)) => *oid,
+            BindingValue::Value(ObjectValue::ObjectId(oid)) => oid,
             _ => panic!("want oid, got {:?}", bind.value),
         }
     }
@@ -1135,7 +1133,7 @@ mod tests {
 
         assert_eq!(asn1.variable_bindings[1].name, "1.3.6.1.2.1.1.2.0".parse().unwrap());
         let oid1 = gimme_oid(&asn1.variable_bindings[1]);
-        assert_eq!(oid1, "1.3.6.1.4.1.9.12.3.1.3.1008".parse().unwrap());
+        assert_eq!(oid1, &"1.3.6.1.4.1.9.12.3.1.3.1008".parse().unwrap());
 
         assert_eq!(asn1.variable_bindings[2].name, "1.3.6.1.2.1.1.3.0".parse().unwrap());
         let time2 = gimme_time(&asn1.variable_bindings[2]);
@@ -1380,7 +1378,7 @@ mod tests {
         assert_eq!(inner_pdu.variable_bindings[0].name, "1.3.6.1.2.1.1.1.0".parse().unwrap());
         assert_eq!(gimme_octets(&inner_pdu.variable_bindings[0]), b"Cisco NX-OS(tm) n5000, Software (n5000-uk9), Version 6.0(2)N2(4), RELEASE SOFTWARE Copyright (c) 2002-2012 by Cisco Systems, Inc. Device Manager Version 6.2(1),  Compiled 2/24/2014 14:00:00");
         assert_eq!(inner_pdu.variable_bindings[1].name, "1.3.6.1.2.1.1.2.0".parse().unwrap());
-        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[1]), "1.3.6.1.4.1.9.12.3.1.3.1008".parse().unwrap());
+        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[1]), &"1.3.6.1.4.1.9.12.3.1.3.1008".parse().unwrap());
         assert_eq!(inner_pdu.variable_bindings[2].name, "1.3.6.1.2.1.1.3.0".parse().unwrap());
         assert_eq!(gimme_time(&inner_pdu.variable_bindings[2]), 2582027205);
         assert_eq!(inner_pdu.variable_bindings[3].name, "1.3.6.1.2.1.1.4.0".parse().unwrap());
@@ -1394,9 +1392,9 @@ mod tests {
         assert_eq!(inner_pdu.variable_bindings[7].name, "1.3.6.1.2.1.1.8.0".parse().unwrap());
         assert_eq!(gimme_time(&inner_pdu.variable_bindings[7]), 4294967166);
         assert_eq!(inner_pdu.variable_bindings[8].name, "1.3.6.1.2.1.1.9.1.2.1".parse().unwrap());
-        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[8]), "1.3.6.1.6.3.1".parse().unwrap());
+        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[8]), &"1.3.6.1.6.3.1".parse().unwrap());
         assert_eq!(inner_pdu.variable_bindings[9].name, "1.3.6.1.2.1.1.9.1.2.2".parse().unwrap());
-        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[9]), "1.3.6.1.6.3.16.2.2.1".parse().unwrap());
+        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[9]), &"1.3.6.1.6.3.16.2.2.1".parse().unwrap());
     }
 
     #[test]
@@ -1533,7 +1531,7 @@ mod tests {
         assert_eq!(inner_pdu.variable_bindings[2].name, "1.3.6.1.4.1.34195.1.99999.69.3.0".parse().unwrap());
         assert_eq!(gimme_octets(&inner_pdu.variable_bindings[2]), &[23, 42, 69]);
         assert_eq!(inner_pdu.variable_bindings[3].name, "1.3.6.1.4.1.34195.1.99999.69.4.0".parse().unwrap());
-        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[3]), "1.3.6.1.4.1.34195.1.99999.69.9".parse().unwrap());
+        assert_eq!(gimme_oid(&inner_pdu.variable_bindings[3]), &"1.3.6.1.4.1.34195.1.99999.69.9".parse().unwrap());
         assert_eq!(inner_pdu.variable_bindings[4].name, "1.3.6.1.4.1.34195.1.99999.69.5.0".parse().unwrap());
         assert_eq!(gimme_ip(&inner_pdu.variable_bindings[4]), "128.131.34.30".parse::<Ipv4Addr>().unwrap());
         assert_eq!(inner_pdu.variable_bindings[5].name, "1.3.6.1.4.1.34195.1.99999.69.6.0".parse().unwrap());
