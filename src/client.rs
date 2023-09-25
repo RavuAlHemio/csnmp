@@ -168,7 +168,14 @@ impl Snmp2cClient {
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.inform(bindings, request_id, &options).await
     }
-
+    /// Sends a Set message, setting value on a snmp device.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set(&self, oid: ObjectIdentifier, value: ObjectValue) -> Result<ObjectValue, SnmpClientError>{
+        let options = self.get_operation_options();
+        let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.low_level_client.set(oid,value, request_id, &options).await
+    
+    }
     /// Walks an OID tree from the given OID, collecting and returning the results.
     ///
     /// This is a high-level operation using [`get`] and [`get_next`] under the hood.
@@ -577,7 +584,54 @@ impl LowLevelSnmp2cClient {
 
         Ok(value)
     }
+    /// SnmpSET
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set(
+        &self,
+        oid: ObjectIdentifier,
+        value: ObjectValue,
+        request_id: i32,
+        options: &OperationOptions,
+    ) -> Result<ObjectValue, SnmpClientError> {
+        // prepare Get message
+        let get_message = Snmp2cMessage {
+            version: VERSION_VALUE,
+            community: options.community.clone(),
+            pdu: Snmp2cPdu::SetRequest(InnerPdu {
+                request_id,
+                error_status: ErrorStatus::NoError,
+                error_index: 0,
+                variable_bindings: vec![
+                    VariableBinding {
+                        name: oid,
+                        value: BindingValue::Value(value),
+                    },
+                ],
+            }),
+        };
+        let mut pdu = self.send_receive(
+            &get_message,
+            options.target,
+            options.send_timeout,
+            options.receive_timeout,
+        ).await?;
 
+        if pdu.variable_bindings.len() != 1 {
+            return Err(SnmpClientError::BindingCount { expected: 1, obtained: pdu.variable_bindings });
+        }
+        let binding = pdu.variable_bindings.remove(0);
+
+        if binding.name != oid {
+            return Err(SnmpClientError::UnexpectedValue { expected: oid, obtained: vec![binding] });
+        }
+
+        let value = match binding.value {
+            BindingValue::Value(v) => v,
+            _ => return Err(SnmpClientError::FailedBinding { binding }),
+        };
+
+        Ok(value)
+    }
     /// Obtains values for multiple specified SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(
