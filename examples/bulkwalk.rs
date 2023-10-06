@@ -36,7 +36,6 @@ async fn run() -> ExitCode {
 
     let results_res = client.walk_bulk(
         top_oid,
-        0,
         10,
     ).await;
     let results = results_res.expect("failed to bulk-walk");
