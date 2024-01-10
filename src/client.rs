@@ -48,11 +48,12 @@ pub struct Snmp2cClient {
     community: Vec<u8>,
     request_id: AtomicI32,
     timeout: Option<Duration>,
+    retries: usize,
 }
 impl Snmp2cClient {
     /// Creates a new SNMP2c client.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn new(target: SocketAddr, community: Vec<u8>, bind_addr: Option<SocketAddr>, timeout: Option<Duration>) -> Result<Self, SnmpClientError> {
+    pub async fn new(target: SocketAddr, community: Vec<u8>, bind_addr: Option<SocketAddr>, timeout: Option<Duration>, retries: usize) -> Result<Self, SnmpClientError> {
         let low_level_client = LowLevelSnmp2cClient::new(
             bind_addr,
             timeout,
@@ -64,6 +65,7 @@ impl Snmp2cClient {
             community,
             request_id: AtomicI32::new(0),
             timeout,
+            retries,
         })
     }
 
@@ -108,6 +110,14 @@ impl Snmp2cClient {
     /// it gives up.
     pub fn set_timeout(&mut self, new_timeout: Option<Duration>) { self.timeout = new_timeout; }
 
+    /// Returns the number of additional attempts to send the same message if the first attempt
+    /// produces no reaction.
+    pub fn retries(&self) -> usize { self.retries }
+
+    /// Changes the number of additional attempts to send the same message if the first attempt
+    /// produces no reaction.
+    pub fn set_retries(&mut self, new_retries: usize) { self.retries = new_retries; }
+
     /// Obtains the options that guide the request.
     fn get_operation_options(&self) -> OperationOptions {
         OperationOptions {
@@ -115,6 +125,7 @@ impl Snmp2cClient {
             send_timeout: self.timeout(),
             receive_timeout: self.timeout(),
             community: self.community.clone(),
+            retries: self.retries(),
         }
     }
 
@@ -374,6 +385,10 @@ pub struct OperationOptions {
     /// The community string used for SNMP2c authentication.
     #[derivative(Debug="ignore")]
     pub community: Vec<u8>,
+
+    /// The number of additional attempts to perform if no response is received after the first
+    /// attempt.
+    pub retries: usize,
 }
 
 
@@ -435,9 +450,9 @@ impl LowLevelSnmp2cClient {
         Ok(())
     }
 
-    /// Performs the sending and receiving of an SNMP message.
+    /// Performs one attempt at sending and receiving of an SNMP message.
     #[cfg_attr(feature = "tracing", instrument)]
-    async fn send_receive(
+    async fn single_send_receive(
         &self,
         outgoing: &Snmp2cMessage,
         target: SocketAddr,
@@ -494,6 +509,31 @@ impl LowLevelSnmp2cClient {
             Snmp2cPdu::Response(inner) => Ok(inner),
             _ => Err(SnmpClientError::InvalidPdu { pdu: message.pdu }),
         }
+    }
+
+    /// Performs the sending and receiving of an SNMP message.
+    #[cfg_attr(feature = "tracing", instrument)]
+    async fn send_receive(
+        &self,
+        outgoing: &Snmp2cMessage,
+        options: &OperationOptions,
+    ) -> Result<InnerPdu, SnmpClientError> {
+        for _attempt in 0..(options.retries+1) {
+            let send_receive_result = self.single_send_receive(
+                outgoing,
+                options.target,
+                options.send_timeout,
+                options.receive_timeout,
+            ).await;
+            match send_receive_result {
+                Ok(p) => return Ok(p),
+                Err(SnmpClientError::TimedOut) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        // all attempts failed; return the timeouts we ignored until now
+        Err(SnmpClientError::TimedOut)
     }
 
     /// Processes the results of an operation that can return multiple values.
@@ -580,9 +620,7 @@ impl LowLevelSnmp2cClient {
         };
         let mut pdu = self.send_receive(
             &get_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != 1 {
@@ -631,9 +669,7 @@ impl LowLevelSnmp2cClient {
         };
         let pdu = self.send_receive(
             &get_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != binding_count {
@@ -679,9 +715,7 @@ impl LowLevelSnmp2cClient {
         };
         let mut pdu = self.send_receive(
             &get_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != 1 {
@@ -730,9 +764,7 @@ impl LowLevelSnmp2cClient {
         };
         let pdu = self.send_receive(
             &get_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != binding_count {
@@ -778,9 +810,7 @@ impl LowLevelSnmp2cClient {
         };
         let mut pdu = self.send_receive(
             &get_next_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != 1 {
@@ -840,9 +870,7 @@ impl LowLevelSnmp2cClient {
         };
         let pdu = self.send_receive(
             &get_bulk_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         let min_oid_opt = oids.iter().min().map(|o| o.clone());
@@ -911,9 +939,7 @@ impl LowLevelSnmp2cClient {
         };
         let pdu = self.send_receive(
             &inform_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         // handle this similarly to Get-Bulk
