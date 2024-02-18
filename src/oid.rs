@@ -541,4 +541,31 @@ mod tests {
         tfs(&[1, 3, 4], "1.3.4");
         tfs(&[1, 3, 4, 4294967295, 1], "1.3.4.4294967295.1");
     }
+
+    #[test]
+    fn test_cmp() {
+        let oid_empty = ObjectIdentifier::from_str("").unwrap();
+        let oid23 = ObjectIdentifier::from_str("2.3").unwrap();
+        let oid310 = ObjectIdentifier::from_str("3.1.0").unwrap();
+        let oid32 = ObjectIdentifier::from_str("3.2").unwrap();
+        let oid320 = ObjectIdentifier::from_str("3.2.0").unwrap();
+        let oid_max_long = ObjectIdentifier::new(
+            MAX_SUB_IDENTIFIER_COUNT,
+            [u32::MAX; MAX_SUB_IDENTIFIER_COUNT],
+        );
+
+        // Different common prefix, different length
+        assert_eq!(oid32.cmp(&oid310), Ordering::Greater);
+        assert_eq!(oid310.cmp(&oid32), Ordering::Less);
+        // Different common prefix, same length
+        assert_eq!(oid32.cmp(&oid23), Ordering::Greater);
+        assert_eq!(oid23.cmp(&oid32), Ordering::Less);
+        // Same common prefix, different length
+        assert_eq!(oid320.cmp(&oid32), Ordering::Greater);
+        assert_eq!(oid32.cmp(&oid320), Ordering::Less);
+        // Same common prefix, same length (a.k.a. equal)
+        assert_eq!(oid_empty.cmp(&oid_empty), Ordering::Equal);
+        assert_eq!(oid310.cmp(&oid310), Ordering::Equal);
+        assert_eq!(oid_max_long.cmp(&oid_max_long), Ordering::Equal);
+    }
 }
