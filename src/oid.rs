@@ -333,21 +333,12 @@ impl fmt::Display for ObjectIdentifier {
 }
 impl PartialOrd for ObjectIdentifier {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // compare up to the common length
-        let shorter_length = self.length.min(other.length);
-        for i in 0..shorter_length {
-            let comparison = self.sub_identifiers[i].cmp(&other.sub_identifiers[i]);
-            if comparison != Ordering::Equal {
-                return Some(comparison);
-            }
-        }
-        // one is a prefix of the other; compare by length
-        Some(self.length.cmp(&other.length))
+        Some(self.cmp(other))
     }
 }
 impl Ord for ObjectIdentifier {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
+        self.sub_identifiers[..self.length].cmp(&other.sub_identifiers[..other.length])
     }
 }
 impl FromStr for ObjectIdentifier {
