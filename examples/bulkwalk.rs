@@ -40,7 +40,7 @@ async fn run() -> ExitCode {
     let results = results_res.expect("failed to bulk-walk");
 
     for (oid, value) in results {
-        println!("{}: {:?}", oid, value);
+        println!("{oid}: {value:?}");
     }
 
     ExitCode::SUCCESS

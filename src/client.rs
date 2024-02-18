@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,7 @@ impl Snmp2cClient {
 
     /// Changes the socket address of the target SNMP agent.
     ///
+    /// # Panics
     /// Panics if the current target address has a different address family (e.g. due to a differing
     /// IP version) than the new target address.
     pub fn set_target(&mut self, new_target: SocketAddr) -> Result<(), SnmpClientError> {
@@ -85,9 +86,11 @@ impl Snmp2cClient {
             SocketAddr::V4(_) => 4,
             SocketAddr::V6(_) => 6,
         };
-        if my_version != their_version {
-            panic!("SNMP client changing IP version of target! currently {}, newly {}", self.target, new_target);
-        }
+        assert!(
+            my_version == their_version,
+            "SNMP client changing from IPv{} to IPv{new_target}",
+            self.target,
+        );
 
         self.target = new_target;
         Ok(())
@@ -302,33 +305,33 @@ impl fmt::Display for SnmpClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CreatingSocket { io_error }
-                => write!(f, "error creating socket: {}", io_error),
+                => write!(f, "error creating socket: {io_error}"),
             Self::Connecting { io_error }
-                => write!(f, "error connecting socket: {}", io_error),
+                => write!(f, "error connecting socket: {io_error}"),
             Self::EncodingOutgoing { message_error }
-                => write!(f, "error encoding outgoing message: {}", message_error),
+                => write!(f, "error encoding outgoing message: {message_error}"),
             Self::Sending { io_error }
-                => write!(f, "error sending message: {}", io_error),
+                => write!(f, "error sending message: {io_error}"),
             Self::ShortSend { expected, sent }
-                => write!(f, "sent {} bytes, expected to send {} bytes", sent, expected),
+                => write!(f, "sent {sent} bytes, expected to send {expected} bytes"),
             Self::Receiving { io_error }
-                => write!(f, "error receiving message: {}", io_error),
+                => write!(f, "error receiving message: {io_error}"),
             Self::DecodingIncoming { message_error }
-                => write!(f, "error decoding incoming message: {}", message_error),
+                => write!(f, "error decoding incoming message: {message_error}"),
             Self::InvalidPdu { pdu }
-                => write!(f, "invalid PDU in response: {:?}", pdu),
+                => write!(f, "invalid PDU in response: {pdu:?}"),
             Self::BindingCount { expected, obtained }
-                => write!(f, "expected {} variable bindings, obtained {}", expected, obtained.len()),
+                => write!(f, "expected {expected} variable bindings, obtained {}", obtained.len()),
             Self::UnexpectedValue { expected, obtained }
-                => write!(f, "expected value for {}, obtained {:?}", expected, obtained),
+                => write!(f, "expected value for {expected}, obtained {obtained:?}"),
             Self::PrecedingValue { previous_oid, obtained }
-                => write!(f, "expected value after {}, obtained {:?}", previous_oid, obtained),
+                => write!(f, "expected value after {previous_oid}, obtained {obtained:?}"),
             Self::NonIncreasingValue { previous_oid, next_oid, obtained }
-                => write!(f, "{} is not greater than {} in {:?}", next_oid, previous_oid, obtained),
+                => write!(f, "{next_oid} is not greater than {previous_oid} in {obtained:?}"),
             Self::DuplicateValue { oid, obtained }
-                => write!(f, "multiple values obtained for {}: {:?}", oid, obtained),
+                => write!(f, "multiple values obtained for {oid}: {obtained:?}"),
             Self::FailedBinding { binding }
-                => write!(f, "failed binding encountered: {:?}", binding),
+                => write!(f, "failed binding encountered: {binding:?}"),
             Self::TimedOut
                 => write!(f, "operation timed out"),
         }
@@ -337,21 +340,21 @@ impl fmt::Display for SnmpClientError {
 impl std::error::Error for SnmpClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SnmpClientError::CreatingSocket { io_error, .. } => Some(io_error),
-            SnmpClientError::Connecting { io_error, .. } => Some(io_error),
-            SnmpClientError::EncodingOutgoing { message_error, .. } => Some(message_error),
-            SnmpClientError::Sending { io_error, .. } => Some(io_error),
-            SnmpClientError::ShortSend { .. } => None,
-            SnmpClientError::Receiving { io_error, .. } => Some(io_error),
-            SnmpClientError::DecodingIncoming { message_error, .. } => Some(message_error),
-            SnmpClientError::InvalidPdu { .. } => None,
-            SnmpClientError::BindingCount { .. } => None,
-            SnmpClientError::UnexpectedValue { .. } => None,
-            SnmpClientError::PrecedingValue { .. } => None,
-            SnmpClientError::NonIncreasingValue { .. } => None,
-            SnmpClientError::DuplicateValue { .. } => None,
-            SnmpClientError::FailedBinding { .. } => None,
-            SnmpClientError::TimedOut => None,
+            SnmpClientError::Connecting { io_error, .. }
+            | SnmpClientError::CreatingSocket { io_error, .. }
+            | SnmpClientError::Sending { io_error, .. }
+            | SnmpClientError::Receiving { io_error, .. } => Some(io_error),
+            SnmpClientError::EncodingOutgoing { message_error, .. }
+            | SnmpClientError::DecodingIncoming { message_error, .. } => Some(message_error),
+            SnmpClientError::ShortSend { .. }
+            | SnmpClientError::InvalidPdu { .. }
+            | SnmpClientError::BindingCount { .. }
+            | SnmpClientError::UnexpectedValue { .. }
+            | SnmpClientError::PrecedingValue { .. }
+            | SnmpClientError::NonIncreasingValue { .. }
+            | SnmpClientError::DuplicateValue { .. }
+            | SnmpClientError::FailedBinding { .. }
+            | SnmpClientError::TimedOut => None,
         }
     }
 }
@@ -414,7 +417,7 @@ impl LowLevelSnmp2cClient {
             ba
         } else {
             // assume V4-over-V6 works
-            SocketAddr::V6("[::]:0".parse().unwrap())
+            SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0)
         };
 
         let socket = maybe_timeout(bind_timeout, UdpSocket::bind(actual_bind_addr)).await?
@@ -517,7 +520,7 @@ impl LowLevelSnmp2cClient {
         outgoing: &Snmp2cMessage,
         options: &OperationOptions,
     ) -> Result<InnerPdu, SnmpClientError> {
-        for _attempt in 0..(options.retries+1) {
+        for _attempt in 0..=options.retries {
             let send_receive_result = self.single_send_receive(
                 outgoing,
                 options.target,
@@ -544,9 +547,8 @@ impl LowLevelSnmp2cClient {
     /// previously encountered OID, an error is returned.
     #[cfg_attr(feature = "tracing", instrument)]
     fn process_bulk_results(
-        &self,
         pdu: InnerPdu,
-        min_oid_opt: Option<ObjectIdentifier>,
+        min_oid_opt: Option<&ObjectIdentifier>,
         ensure_increasing: bool,
     ) -> Result<GetBulkResult, SnmpClientError> {
         let mut values = BTreeMap::new();
@@ -555,8 +557,8 @@ impl LowLevelSnmp2cClient {
 
         for binding in &pdu.variable_bindings {
             if let Some(min_oid) = min_oid_opt {
-                if binding.name <= min_oid {
-                    return Err(SnmpClientError::PrecedingValue { previous_oid: min_oid, obtained: pdu.variable_bindings });
+                if &binding.name <= min_oid {
+                    return Err(SnmpClientError::PrecedingValue { previous_oid: *min_oid, obtained: pdu.variable_bindings });
                 }
             }
 
@@ -631,9 +633,8 @@ impl LowLevelSnmp2cClient {
             return Err(SnmpClientError::UnexpectedValue { expected: oid, obtained: vec![binding] });
         }
 
-        let value = match binding.value {
-            BindingValue::Value(v) => v,
-            _ => return Err(SnmpClientError::FailedBinding { binding }),
+        let BindingValue::Value(value) = binding.value else {
+            return Err(SnmpClientError::FailedBinding { binding });
         };
 
         Ok(value)
@@ -677,9 +678,8 @@ impl LowLevelSnmp2cClient {
 
         let mut results = BTreeMap::new();
         for binding in pdu.variable_bindings {
-            let value = match binding.value {
-                BindingValue::Value(v) => v,
-                _ => return Err(SnmpClientError::FailedBinding { binding }),
+            let BindingValue::Value(value) = binding.value else {
+                return Err(SnmpClientError::FailedBinding { binding });
             };
             results.insert(binding.name, value);
         }
@@ -726,9 +726,8 @@ impl LowLevelSnmp2cClient {
             return Err(SnmpClientError::UnexpectedValue { expected: oid, obtained: vec![binding] });
         }
 
-        let value = match binding.value {
-            BindingValue::Value(v) => v,
-            _ => return Err(SnmpClientError::FailedBinding { binding }),
+        let BindingValue::Value(value) =  binding.value else {
+            return Err(SnmpClientError::FailedBinding { binding });
         };
 
         Ok(value)
@@ -772,9 +771,8 @@ impl LowLevelSnmp2cClient {
 
         let mut results = BTreeMap::new();
         for binding in pdu.variable_bindings {
-            let value = match binding.value {
-                BindingValue::Value(v) => v,
-                _ => return Err(SnmpClientError::FailedBinding { binding }),
+            let BindingValue::Value(value) = binding.value else {
+                return Err(SnmpClientError::FailedBinding { binding });
             };
             results.insert(binding.name, value);
         }
@@ -822,9 +820,8 @@ impl LowLevelSnmp2cClient {
             return Err(SnmpClientError::PrecedingValue { previous_oid: prev_oid, obtained: vec![binding] });
         }
 
-        let value = match binding.value {
-            BindingValue::Value(v) => v,
-            _ => return Err(SnmpClientError::FailedBinding { binding }),
+        let BindingValue::Value(value) = binding.value else {
+            return Err(SnmpClientError::FailedBinding { binding });
         };
 
         Ok((binding.name, value))
@@ -872,8 +869,8 @@ impl LowLevelSnmp2cClient {
             options,
         ).await?;
 
-        let min_oid_opt = oids.iter().min().copied();
-        self.process_bulk_results(pdu, min_oid_opt, false)
+        let min_oid_opt = oids.iter().min();
+        Self::process_bulk_results(pdu, min_oid_opt, false)
     }
 
     /// Sends a trap message, informing a management station about one or more events.
@@ -942,7 +939,7 @@ impl LowLevelSnmp2cClient {
         ).await?;
 
         // handle this similarly to Get-Bulk
-        self.process_bulk_results(pdu, None, false)
+        Self::process_bulk_results(pdu, None, false)
     }
 
     /// Walks an OID tree from the given OID, collecting and returning the results.
@@ -995,9 +992,8 @@ impl LowLevelSnmp2cClient {
                     if let BindingValue::EndOfMibView = binding.value {
                         // there will be no more values
                         break;
-                    } else {
-                        return Err(SnmpClientError::FailedBinding { binding });
                     }
+                    return Err(SnmpClientError::FailedBinding { binding });
                 },
                 Err(e) => return Err(e),
             }

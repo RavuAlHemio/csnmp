@@ -54,13 +54,13 @@ impl fmt::Display for ObjectIdentifierConversionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLong { obtained, max }
-                => write!(f, "slice has length {}, maximum is {}", obtained, max),
+                => write!(f, "slice has length {obtained}, maximum is {max}"),
             Self::ValueRange { index }
-                => write!(f, "value at index {} is out of range", index),
+                => write!(f, "value at index {index} is out of range"),
             Self::TooShort { length }
-                => write!(f, "need more than {} elements", length),
+                => write!(f, "need more than {length} elements"),
             Self::InvalidSubIdString { index }
-                => write!(f, "invalid sub-identifier at index {}", index),
+                => write!(f, "invalid sub-identifier at index {index}"),
         }
     }
 }
@@ -226,6 +226,7 @@ impl ObjectIdentifier {
 
     /// Returns the length of this object identifier. Guaranteed to be at least 0 and less than
     /// [`MAX_SUB_IDENTIFIER_COUNT`].
+    #[must_use]
     pub fn len(&self) -> usize {
         self.length
     }
@@ -237,6 +238,7 @@ impl ObjectIdentifier {
     }
 
     /// Obtains the sub-identifier at the given index, or `None` if the index is out of bounds.
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<u32> {
         if index < self.length {
             Some(self.sub_identifiers[index])
@@ -246,11 +248,13 @@ impl ObjectIdentifier {
     }
 
     /// Returns this object identifier als a slice of unsigned 32-bit integers.
+    #[must_use]
     pub fn as_slice(&self) -> &[u32] {
         &self.sub_identifiers[0..self.length]
     }
 
     /// Returns the parent of this object identifier, or `None` if it has no parent.
+    #[must_use]
     pub fn parent(&self) -> Option<Self> {
         if self.length == 0 {
             None
@@ -263,6 +267,7 @@ impl ObjectIdentifier {
 
     /// Returns a child of this object identifier constructed by appending the given `sub_id`,
     /// or `None` if that would create an object identifier that is too long.
+    #[must_use]
     pub fn child(&self, sub_id: u32) -> Option<Self> {
         if self.length == MAX_SUB_IDENTIFIER_COUNT {
             None
@@ -294,12 +299,14 @@ impl ObjectIdentifier {
 
     /// Returns whether this object identifier is a prefix of another object identifier or equal to
     /// it.
+    #[must_use]
     pub fn is_prefix_of_or_equal(&self, other: &Self) -> bool {
         other.tail_slice(self).is_some()
     }
 
     /// Returns whether this object identifier is a prefix of another object identifier. Returns
     /// `false` if the object identifiers are equal.
+    #[must_use]
     pub fn is_prefix_of(&self, other: &Self) -> bool {
         // same length is also unacceptable
         if self.len() >= other.len() {
@@ -311,6 +318,7 @@ impl ObjectIdentifier {
 
     /// Returns this object identifier relative to the given `base` object identifier. Returns
     /// `None` if `base` is not a prefix of or equal to this object identifier.
+    #[must_use]
     pub fn relative_to(&self, base: &Self) -> Option<Self> {
         self.tail_slice(base)
             .map(|ts| Self::try_from(ts).unwrap())
@@ -323,7 +331,7 @@ impl Default for ObjectIdentifier {
 }
 impl fmt::Debug for ObjectIdentifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ObjectIdentifier({})", self)
+        write!(f, "ObjectIdentifier({self})")
     }
 }
 impl fmt::Display for ObjectIdentifier {
@@ -356,10 +364,10 @@ impl FromStr for ObjectIdentifier {
         let stripped = stripped_start.strip_suffix('.').unwrap_or(stripped_start);
 
         // split on dots
-        let pieces: Vec<&str> = if !stripped.is_empty() {
-            stripped.split('.').collect()
-        } else {
+        let pieces: Vec<&str> = if stripped.is_empty() {
             Vec::new()
+        } else {
+            stripped.split('.').collect()
         };
         if pieces.len() > MAX_SUB_IDENTIFIER_COUNT {
             return Err(ObjectIdentifierConversionError::TooLong {
@@ -517,7 +525,7 @@ mod tests {
         tts(&[1, 3, 6, 1, 4, 1, 1, 2, 3, 4, 5], "1.3.6.1.4.1.1.2.3.4.5");
         tts(&[3, 2, 1], "3.2.1");
         tts(&[1, 3, 4], "1.3.4");
-        tts(&[1, 3, 4, 4294967295, 1], "1.3.4.4294967295.1");
+        tts(&[1, 3, 4, 4_294_967_295, 1], "1.3.4.4294967295.1");
     }
 
     #[test]
@@ -534,7 +542,7 @@ mod tests {
         tfs(&[1, 3, 6, 1, 4, 1, 1, 2, 3, 4, 5], "1.3.6.1.4.1.1.2.3.4.5");
         tfs(&[3, 2, 1], "3.2.1");
         tfs(&[1, 3, 4], "1.3.4");
-        tfs(&[1, 3, 4, 4294967295, 1], "1.3.4.4294967295.1");
+        tfs(&[1, 3, 4, 4_294_967_295, 1], "1.3.4.4294967295.1");
     }
 
     #[test]

@@ -99,26 +99,26 @@ impl SnmpMessageError {
     /// elements. Returns `Ok(())` if it does and `Err(_)` with an appropriate [`SnmpMessageError`]
     /// variant if it does not.
     pub fn check_length(blocks: &[ASN1Block], expected: usize) -> Result<(), SnmpMessageError> {
-        if blocks.len() != expected {
+        if blocks.len() == expected {
+            Ok(())
+        } else {
             Err(SnmpMessageError::Length {
                 expected,
                 obtained: blocks.len(),
             })
-        } else {
-            Ok(())
         }
     }
 
     /// Checks whether the given [`ASN1Class`] has the given value. Returns `Ok(())` if it does and
     /// `Err(_)` with an appropriate [`SnmpMessageError`] variant if it does not.
     pub fn check_tag_class(obtained: ASN1Class, expected: ASN1Class) -> Result<(), SnmpMessageError> {
-        if obtained != expected {
+        if obtained == expected {
+            Ok(())
+        } else {
             Err(SnmpMessageError::UnexpectedTagClass {
                 expected: vec![expected],
                 obtained,
             })
-        } else {
-            Ok(())
         }
     }
 }
@@ -126,31 +126,31 @@ impl fmt::Display for SnmpMessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Asn1Decoding(asn1)
-                => write!(f, "ASN.1 decoding error: {}", asn1),
+                => write!(f, "ASN.1 decoding error: {asn1}"),
             Self::Asn1Encoding(asn1)
-                => write!(f, "ASN.1 encoding error: {}", asn1),
+                => write!(f, "ASN.1 encoding error: {asn1}"),
             Self::Length { expected, obtained }
-                => write!(f, "message has wrong length: expected {} ASN.1 blocks, obtained {}", expected, obtained),
+                => write!(f, "message has wrong length: expected {expected} ASN.1 blocks, obtained {obtained}"),
             Self::TooShort { expected, obtained }
-                => write!(f, "message too short: expected {} ASN.1 blocks, obtained {}", expected, obtained),
+                => write!(f, "message too short: expected {expected} ASN.1 blocks, obtained {obtained}"),
             Self::UnexpectedType { expected, obtained }
-                => write!(f, "expected {:?} value, obtained {:?}", expected, obtained),
+                => write!(f, "expected {expected:?} value, obtained {obtained:?}"),
             Self::IntegerPrimitiveRange { primitive_type, obtained }
-                => write!(f, "integer value does not fit into {}, obtained {:?}", primitive_type, obtained),
+                => write!(f, "integer value does not fit into {primitive_type}, obtained {obtained:?}"),
             Self::IncorrectVersion { expected, obtained }
-                => write!(f, "incorrect SNMP message version: expected {}, obtained {}", expected, obtained),
+                => write!(f, "incorrect SNMP message version: expected {expected}, obtained {obtained}"),
             Self::UnexpectedTag { obtained }
-                => write!(f, "unexpected tag; obtained {:?}", obtained),
+                => write!(f, "unexpected tag; obtained {obtained:?}"),
             Self::UnexpectedTagClass { expected, obtained }
-                => write!(f, "unexpected tag class: expected {:?}, obtained {:?}", expected, obtained),
+                => write!(f, "unexpected tag class: expected {expected:?}, obtained {obtained:?}"),
             Self::UntaggedValue { obtained }
-                => write!(f, "untagged value; obtained {:?}", obtained),
+                => write!(f, "untagged value; obtained {obtained:?}"),
             Self::EnumRange { enum_name, obtained }
-                => write!(f, "invalid value {:?} obtained for enumeration {:?}", obtained, enum_name),
+                => write!(f, "invalid value {obtained:?} obtained for enumeration {enum_name:?}"),
             Self::OidDecode { oid, error }
-                => write!(f, "object identifier {:?} invalid for SNMP: {}", oid, error),
+                => write!(f, "object identifier {oid:?} invalid for SNMP: {error}"),
             Self::OidEncode { oid, error }
-                => write!(f, "object identifier {:?} invalid for ASN.1: {}", oid, error),
+                => write!(f, "object identifier {oid:?} invalid for ASN.1: {error}"),
         }
     }
 }
@@ -450,15 +450,16 @@ pub enum Snmp2cPdu {
 }
 impl Snmp2cPdu {
     /// Returns the request ID from the inner SNMP2c Protocol Data Unit (PDU).
+    #[must_use]
     pub fn request_id(&self) -> i32 {
         match self {
-            Self::GetRequest(p) => p.request_id,
-            Self::GetNextRequest(p) => p.request_id,
             Self::GetBulkRequest(p) => p.request_id,
-            Self::Response(p) => p.request_id,
-            Self::SetRequest(p) => p.request_id,
-            Self::InformRequest(p) => p.request_id,
-            Self::SnmpV2Trap(p) => p.request_id,
+            Self::GetRequest(p)
+            | Self::GetNextRequest(p)
+            | Self::Response(p)
+            | Self::SetRequest(p)
+            | Self::InformRequest(p)
+            | Self::SnmpV2Trap(p) => p.request_id,
         }
     }
 }
@@ -821,6 +822,7 @@ impl ObjectValue {
     /// Returns [`Some(i32)`] if this `ObjectValue` is an [`Integer`][ObjectValue::Integer];
     /// otherwise, returns [`None`].
     #[allow(dead_code)]
+    #[must_use]
     pub fn as_i32(&self) -> Option<i32> {
         match self {
             Self::Integer(i) => Some(*i),
@@ -832,10 +834,11 @@ impl ObjectValue {
     /// [`Unsigned32`][ObjectValue::Unsigned32], or [`TimeTicks`][ObjectValue::TimeTicks];
     /// otherwise, returns [`None`].
     #[allow(dead_code)]
+    #[must_use]
     pub fn as_u32(&self) -> Option<u32> {
         match self {
-            Self::Counter32(i) => Some(*i),
-            Self::Unsigned32(i) => Some(*i),
+            Self::Counter32(i) |
+            Self::Unsigned32(i) |
             Self::TimeTicks(i) => Some(*i),
             _ => None,
         }
@@ -845,10 +848,11 @@ impl ObjectValue {
     /// [`Unsigned32`][ObjectValue::Unsigned32], [`TimeTicks`][ObjectValue::TimeTicks], or
     /// [`Counter64`][ObjectValue::Counter64]; otherwise, returns [`None`].
     #[allow(dead_code)]
+    #[must_use]
     pub fn as_u64(&self) -> Option<u64> {
         match self {
-            Self::Counter32(i) => Some((*i).into()),
-            Self::Unsigned32(i) => Some((*i).into()),
+            Self::Counter32(i) |
+            Self::Unsigned32(i) |
             Self::TimeTicks(i) => Some((*i).into()),
             Self::Counter64(i) => Some(*i),
             _ => None,
@@ -858,6 +862,7 @@ impl ObjectValue {
     /// Returns [`Some(&Vec<u8>)`] if this `ObjectValue` is a [`String`][ObjectValue::String] or
     /// [`Opaque`][ObjectValue::Opaque]; otherwise, returns [`None`].
     #[allow(dead_code)]
+    #[must_use]
     pub fn as_bytes(&self) -> Option<&Vec<u8>> {
         match self {
             Self::String(s) => Some(s),
@@ -868,6 +873,7 @@ impl ObjectValue {
 
     /// Returns [`Some(ObjectIdentifier)`] if this `ObjectValue` is an
     /// [`ObjectId`][ObjectValue::ObjectId]; otherwise, returns [`None`].
+    #[must_use]
     pub fn as_oid(&self) -> Option<ObjectIdentifier> {
         match self {
             Self::ObjectId(o) => Some(*o),
@@ -877,42 +883,51 @@ impl ObjectValue {
 
     /// Returns whether this `ObjectValue` is an [`Integer`][ObjectValue::Integer].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_integer(&self) -> bool { matches!(self, Self::Integer(_)) }
 
     /// Returns whether this `ObjectValue` is a [`String`][ObjectValue::String].
     #[allow(dead_code)]
-    pub fn is_string(&self) -> bool { matches!(self, Self::String(_)) }
+    #[must_use]pub fn is_string(&self) -> bool { matches!(self, Self::String(_)) }
 
     /// Returns whether this `ObjectValue` is an [`ObjectId`][ObjectValue::ObjectId].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_object_id(&self) -> bool { matches!(self, Self::ObjectId(_)) }
 
     /// Returns whether this `ObjectValue` is an [`IpAddress`][ObjectValue::IpAddress].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_ip_address(&self) -> bool { matches!(self, Self::IpAddress(_)) }
 
     /// Returns whether this `ObjectValue` is a [`Counter32`][ObjectValue::Counter32].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_counter32(&self) -> bool { matches!(self, Self::Counter32(_)) }
 
     /// Returns whether this `ObjectValue` is an [`Unsigned32`][ObjectValue::Unsigned32].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_unsigned32(&self) -> bool { matches!(self, Self::Unsigned32(_)) }
 
     /// Returns whether this `ObjectValue` is a [`TimeTicks`][ObjectValue::TimeTicks].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_time_ticks(&self) -> bool { matches!(self, Self::TimeTicks(_)) }
 
     /// Returns whether this `ObjectValue` is an [`Opaque`][ObjectValue::Opaque].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_opaque(&self) -> bool { matches!(self, Self::Opaque(_)) }
 
     /// Returns whether this `ObjectValue` is a [`Counter64`][ObjectValue::Counter64].
     #[allow(dead_code)]
+    #[must_use]
     pub fn is_counter64(&self) -> bool { matches!(self, Self::Counter64(_)) }
 
     /// Returns the string representation of this `ObjectValue`'s type.
     #[allow(dead_code)]
+    #[must_use]
     pub fn as_type_str(&self) -> &'static str {
         match self {
             Self::Integer(_) => "Integer",
@@ -1126,6 +1141,7 @@ mod tests {
 
     #[test]
     fn test_decode1() {
+        #[rustfmt::skip]
         let bytes: Vec<u8> = vec![
              48, 129, 238,   2,   1,   1,   4,   5,  70, 113,  97, 116, 101, 162, 129, 225,
               2,   4,  38, 176, 163,  99,   2,   1,   0,   2,   1,   0,  48, 129, 210,  48,
@@ -1149,11 +1165,10 @@ mod tests {
         assert_eq!(asn1.version, 1);
         assert_eq!(asn1.community, b"Fqate");
 
-        let inner_pdu = match asn1.pdu {
-            Snmp2cPdu::Response(inner) => inner,
-            _ => panic!(),
+        let Snmp2cPdu::Response(inner_pdu) = asn1.pdu else {
+            panic!();
         };
-        assert_eq!(inner_pdu.request_id, 649110371);
+        assert_eq!(inner_pdu.request_id, 649_110_371);
         assert_eq!(inner_pdu.error_status, ErrorStatus::NoError);
         assert_eq!(inner_pdu.error_index, 0);
         assert_eq!(inner_pdu.variable_bindings.len(), 10);
@@ -1186,7 +1201,7 @@ mod tests {
             version: 1,
             community: b"Fqate".to_vec(),
             pdu: Snmp2cPdu::Response(InnerPdu {
-                request_id: 649110371,
+                request_id: 649_110_371,
                 error_status: ErrorStatus::NoError,
                 error_index: 0,
                 variable_bindings: vec![
@@ -1235,6 +1250,7 @@ mod tests {
         };
         let bytes = der_encode(&message).unwrap();
 
+        #[rustfmt::skip]
         let expected_bytes: Vec<u8> = vec![
              48, 129, 238,   2,   1,   1,   4,   5,  70, 113,  97, 116, 101, 162, 129, 225,
               2,   4,  38, 176, 163,  99,   2,   1,   0,   2,   1,   0,  48, 129, 210,  48,
@@ -1258,6 +1274,7 @@ mod tests {
 
     #[test]
     fn test_decode2() {
+        #[rustfmt::skip]
         let bytes: Vec<u8> = vec![
              48, 130,   1, 162,   2,   1,   1,   4,   5,  57, 118,  55,  57,  73, 162, 130,
               1, 148,   2,   1,   1,   2,   1,   0,   2,   1,   0,  48, 130,   1, 135,  48,
@@ -1292,9 +1309,8 @@ mod tests {
         assert_eq!(asn1.version, 1);
         assert_eq!(asn1.community, b"9v79I");
 
-        let inner_pdu = match asn1.pdu {
-            Snmp2cPdu::Response(inner) => inner,
-            _ => panic!(),
+        let Snmp2cPdu::Response(inner_pdu) = asn1.pdu  else {
+            panic!();
         };
         assert_eq!(inner_pdu.request_id, 1);
         assert_eq!(inner_pdu.error_status, ErrorStatus::NoError);
@@ -1306,7 +1322,7 @@ mod tests {
         assert_eq!(inner_pdu.variable_bindings[1].name, "1.3.6.1.2.1.1.2.0".parse().unwrap());
         assert_eq!(gimme_oid(&inner_pdu.variable_bindings[1]), "1.3.6.1.4.1.9.12.3.1.3.1008".parse().unwrap());
         assert_eq!(inner_pdu.variable_bindings[2].name, "1.3.6.1.2.1.1.3.0".parse().unwrap());
-        assert_eq!(gimme_time(&inner_pdu.variable_bindings[2]), 2582027205);
+        assert_eq!(gimme_time(&inner_pdu.variable_bindings[2]), 2_582_027_205);
         assert_eq!(inner_pdu.variable_bindings[3].name, "1.3.6.1.2.1.1.4.0".parse().unwrap());
         assert_eq!(gimme_octets(&inner_pdu.variable_bindings[3]), b"KOM");
         assert_eq!(inner_pdu.variable_bindings[4].name, "1.3.6.1.2.1.1.5.0".parse().unwrap());
@@ -1316,7 +1332,7 @@ mod tests {
         assert_eq!(inner_pdu.variable_bindings[6].name, "1.3.6.1.2.1.1.7.0".parse().unwrap());
         assert_eq!(gimme_int(&inner_pdu.variable_bindings[6]), 70);
         assert_eq!(inner_pdu.variable_bindings[7].name, "1.3.6.1.2.1.1.8.0".parse().unwrap());
-        assert_eq!(gimme_time(&inner_pdu.variable_bindings[7]), 4294967166);
+        assert_eq!(gimme_time(&inner_pdu.variable_bindings[7]), 4_294_967_166);
         assert_eq!(inner_pdu.variable_bindings[8].name, "1.3.6.1.2.1.1.9.1.2.1".parse().unwrap());
         assert_eq!(gimme_oid(&inner_pdu.variable_bindings[8]), "1.3.6.1.6.3.1".parse().unwrap());
         assert_eq!(inner_pdu.variable_bindings[9].name, "1.3.6.1.2.1.1.9.1.2.2".parse().unwrap());
@@ -1343,7 +1359,7 @@ mod tests {
                     },
                     VariableBinding {
                         name: "1.3.6.1.2.1.1.3.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::TimeTicks(2582027205)),
+                        value: BindingValue::Value(ObjectValue::TimeTicks(2_582_027_205)),
                     },
                     VariableBinding {
                         name: "1.3.6.1.2.1.1.4.0".parse().unwrap(),
@@ -1363,7 +1379,7 @@ mod tests {
                     },
                     VariableBinding {
                         name: "1.3.6.1.2.1.1.8.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::TimeTicks(4294967166)),
+                        value: BindingValue::Value(ObjectValue::TimeTicks(4_294_967_166)),
                     },
                     VariableBinding {
                         name: "1.3.6.1.2.1.1.9.1.2.1".parse().unwrap(),
@@ -1378,6 +1394,7 @@ mod tests {
         };
         let bytes = der_encode(&message).unwrap();
 
+        #[rustfmt::skip]
         let expected_bytes: Vec<u8> = vec![
              48, 130,   1, 162,   2,   1,   1,   4,   5,  57, 118,  55,  57,  73, 162, 130,
               1, 148,   2,   1,   1,   2,   1,   0,   2,   1,   0,  48, 130,   1, 135,  48,
@@ -1412,6 +1429,7 @@ mod tests {
 
     #[test]
     fn test_decode3() {
+        #[rustfmt::skip]
         let bytes: Vec<u8> = vec![
              48, 130,   1,  53,   2,   1,   1,   4,   8, 114, 101,  97, 100, 111, 110, 108,
             121, 162, 130,   1,  36,   2,   1,   1,   2,   1,   0,   2,   1,   0,  48, 130,
@@ -1439,9 +1457,8 @@ mod tests {
         assert_eq!(asn1.version, 1);
         assert_eq!(asn1.community, b"readonly");
 
-        let inner_pdu = match asn1.pdu {
-            Snmp2cPdu::Response(inner) => inner,
-            _ => panic!(),
+        let Snmp2cPdu::Response(inner_pdu) = asn1.pdu else {
+            panic!();
         };
         assert_eq!(inner_pdu.request_id, 1);
         assert_eq!(inner_pdu.error_status, ErrorStatus::NoError);
@@ -1459,15 +1476,15 @@ mod tests {
         assert_eq!(inner_pdu.variable_bindings[4].name, "1.3.6.1.4.1.34195.1.99999.69.5.0".parse().unwrap());
         assert_eq!(gimme_ip(&inner_pdu.variable_bindings[4]), "128.131.34.30".parse::<Ipv4Addr>().unwrap());
         assert_eq!(inner_pdu.variable_bindings[5].name, "1.3.6.1.4.1.34195.1.99999.69.6.0".parse().unwrap());
-        assert_eq!(gimme_counter(&inner_pdu.variable_bindings[5]), 0xFEFEFEFE);
+        assert_eq!(gimme_counter(&inner_pdu.variable_bindings[5]), 0xFEFE_FEFE);
         assert_eq!(inner_pdu.variable_bindings[6].name, "1.3.6.1.4.1.34195.1.99999.69.7.0".parse().unwrap());
-        assert_eq!(gimme_unsigned(&inner_pdu.variable_bindings[6]), 0xDEADBEEF);
+        assert_eq!(gimme_unsigned(&inner_pdu.variable_bindings[6]), 0xDEAD_BEEF);
         assert_eq!(inner_pdu.variable_bindings[7].name, "1.3.6.1.4.1.34195.1.99999.69.8.0".parse().unwrap());
-        assert_eq!(gimme_time(&inner_pdu.variable_bindings[7]), 0xA55FACE5);
+        assert_eq!(gimme_time(&inner_pdu.variable_bindings[7]), 0xA55F_ACE5);
         assert_eq!(inner_pdu.variable_bindings[8].name, "1.3.6.1.4.1.34195.1.99999.69.9.0".parse().unwrap());
-        assert_eq!(gimme_counter64(&inner_pdu.variable_bindings[8]), 0xDEADBEEFA55FACE5);
+        assert_eq!(gimme_counter64(&inner_pdu.variable_bindings[8]), 0xDEAD_BEEF_A55F_ACE5);
         assert_eq!(inner_pdu.variable_bindings[9].name, "1.3.6.1.6.3.1.1.6.1.0".parse().unwrap());
-        assert_eq!(gimme_int(&inner_pdu.variable_bindings[9]), 605554450);
+        assert_eq!(gimme_int(&inner_pdu.variable_bindings[9]), 605_554_450);
     }
 
     #[test]
@@ -1502,29 +1519,30 @@ mod tests {
                     },
                     VariableBinding {
                         name: "1.3.6.1.4.1.34195.1.99999.69.6.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::Counter32(0xFEFEFEFE)),
+                        value: BindingValue::Value(ObjectValue::Counter32(0xFEFE_FEFE)),
                     },
                     VariableBinding {
                         name: "1.3.6.1.4.1.34195.1.99999.69.7.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::Unsigned32(0xDEADBEEF)),
+                        value: BindingValue::Value(ObjectValue::Unsigned32(0xDEAD_BEEF)),
                     },
                     VariableBinding {
                         name: "1.3.6.1.4.1.34195.1.99999.69.8.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::TimeTicks(0xA55FACE5)),
+                        value: BindingValue::Value(ObjectValue::TimeTicks(0xA55F_ACE5)),
                     },
                     VariableBinding {
                         name: "1.3.6.1.4.1.34195.1.99999.69.9.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::Counter64(0xDEADBEEFA55FACE5)),
+                        value: BindingValue::Value(ObjectValue::Counter64(0xDEAD_BEEF_A55F_ACE5)),
                     },
                     VariableBinding {
                         name: "1.3.6.1.6.3.1.1.6.1.0".parse().unwrap(),
-                        value: BindingValue::Value(ObjectValue::Integer(605554450)),
+                        value: BindingValue::Value(ObjectValue::Integer(605_554_450)),
                     },
                 ],
             }),
         };
         let bytes = der_encode(&message).unwrap();
 
+        #[rustfmt::skip]
         let expected_bytes: Vec<u8> = vec![
              48, 130,   1,  53,   2,   1,   1,   4,   8, 114, 101,  97, 100, 111, 110, 108,
             121, 162, 130,   1,  36,   2,   1,   1,   2,   1,   0,   2,   1,   0,  48, 130,
