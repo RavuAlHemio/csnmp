@@ -3,8 +3,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 
 use csnmp::{ObjectIdentifier, Snmp2cClient};
-use tracing_subscriber;
-
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

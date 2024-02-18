@@ -336,11 +336,7 @@ impl Asn1BlockExtensions for ASN1Block {
     }
 
     fn is_null(&self) -> bool {
-        if let Self::Null(_offset) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Null(_offset))
     }
 
     asn1_number_from_primitive!(from_i32, i32);
@@ -365,7 +361,7 @@ impl Asn1BlockExtensions for ASN1Block {
 
     fn untag_implicit(&self) -> Result<Self, SnmpMessageError> {
         if let Self::Unknown(_cls, _constructed, offset, _tag, content) = self {
-            let parsed_blocks = from_der(&content)?;
+            let parsed_blocks = from_der(content)?;
             let sequence = ASN1Block::Sequence(*offset, parsed_blocks);
             Ok(sequence)
         } else {
@@ -405,9 +401,9 @@ impl FromASN1 for Snmp2cMessage {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 3)?;
+        SnmpMessageError::check_length(seq, 3)?;
 
         let version = seq[0].as_i64()?;
         if version != VERSION_VALUE {
@@ -470,7 +466,7 @@ impl FromASN1 for Snmp2cPdu {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
         let tag = v[0].tag_of_class(ASN1Class::ContextSpecific)?;
         let untagged = v[0].untag_implicit()?;
 
@@ -577,9 +573,9 @@ impl FromASN1 for InnerPdu {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 4)?;
+        SnmpMessageError::check_length(seq, 4)?;
 
         let request_id = seq[0].as_i32()?;
         let error_status = ErrorStatus::try_from(seq[1].as_u8()?)
@@ -633,9 +629,9 @@ impl FromASN1 for BulkPdu {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 4)?;
+        SnmpMessageError::check_length(seq, 4)?;
 
         let request_id = seq[0].as_i32()?;
         let non_repeaters = seq[1].as_u32()?;
@@ -686,9 +682,9 @@ impl FromASN1 for VariableBinding {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 2)?;
+        SnmpMessageError::check_length(seq, 2)?;
 
         let name_asn1 = seq[0].as_oid()?;
         let name = ObjectIdentifier::try_from(name_asn1)
@@ -715,7 +711,7 @@ impl ToASN1 for VariableBinding {
 
         let name_asn1: OID = (&self.name).try_into()
             .map_err(|error| SnmpMessageError::OidEncode {
-                oid: self.name.clone(),
+                oid: self.name,
                 error,
             })?;
 
@@ -750,11 +746,11 @@ impl FromASN1 for BindingValue {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
         let binding_value = match &v[0] {
             ASN1Block::Null(_offset) => Self::Unspecified,
             ASN1Block::Unknown(ASN1Class::ContextSpecific, _constructed, _offset, tag, content_bytes) => {
-                if content_bytes.len() > 0 {
+                if !content_bytes.is_empty() {
                     return Err(SnmpMessageError::UnexpectedType {
                         expected: ExpectedAsn1Type::Null,
                         obtained: v[0].clone(),
@@ -935,7 +931,7 @@ impl FromASN1 for ObjectValue {
     type Error = SnmpMessageError;
 
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
-        SnmpMessageError::check_min_length(&v, 1)?;
+        SnmpMessageError::check_min_length(v, 1)?;
 
         let obj_value = match &v[0] {
             ASN1Block::Integer(_offset, num) => {
@@ -1030,7 +1026,7 @@ impl ToASN1 for ObjectValue {
             Self::ObjectId(oid) => {
                 let oid_val: OID = oid.try_into()
                     .map_err(|error| SnmpMessageError::OidEncode {
-                        oid: oid.clone(),
+                        oid: *oid,
                         error,
                     })?;
                 ret.push(ASN1Block::ObjectIdentifier(0, oid_val));

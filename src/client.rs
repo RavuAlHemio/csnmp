@@ -121,7 +121,7 @@ impl Snmp2cClient {
     /// Obtains the options that guide the request.
     fn get_operation_options(&self) -> OperationOptions {
         OperationOptions {
-            target: self.target.clone(),
+            target: self.target,
             send_timeout: self.timeout(),
             receive_timeout: self.timeout(),
             community: self.community.clone(),
@@ -457,25 +457,24 @@ impl LowLevelSnmp2cClient {
         outgoing: &Snmp2cMessage,
         target: SocketAddr,
         send_timeout: Option<Duration>,
-        receive_timeout: Option<Duration>,
+        mut receive_timeout: Option<Duration>,
     ) -> Result<InnerPdu, SnmpClientError> {
         let sent_request_id = outgoing.pdu.request_id();
         self.send(outgoing, target, send_timeout).await?;
 
         // receive the response
         let mut buf = vec![0u8; 9000];
-        let mut receive_timeout_mut = receive_timeout.clone();
         let message = loop {
             let start_instant = Instant::now();
-            let (bytes_received, sender) = maybe_timeout(receive_timeout_mut, self.socket.recv_from(&mut buf)).await?
+            let (bytes_received, sender) = maybe_timeout(receive_timeout, self.socket.recv_from(&mut buf)).await?
                 .map_err(|io_error| SnmpClientError::Receiving { io_error })?;
             debug!("received {:?} from {}", &buf[0..bytes_received], sender);
             let end_instant = Instant::now();
-            if let Some(rtm) = &receive_timeout_mut {
+            if let Some(rtm) = &receive_timeout {
                 // subtract the elapsed time
                 // (timeout for the whole operation, not just a single read)
-                receive_timeout_mut = rtm.checked_sub(end_instant - start_instant);
-                if receive_timeout_mut.is_none() {
+                receive_timeout = rtm.checked_sub(end_instant - start_instant);
+                if receive_timeout.is_none() {
                     // duration would now be < 0 => we ran out of time; give up
                     return Err(SnmpClientError::TimedOut);
                 }
@@ -853,8 +852,8 @@ impl LowLevelSnmp2cClient {
     ) -> Result<GetBulkResult, SnmpClientError> {
         // prepare GetBulk message
         let variable_bindings: Vec<VariableBinding> = oids.iter()
-            .map(|oid| VariableBinding {
-                name: oid.clone(),
+            .map(|&name| VariableBinding {
+                name,
                 value: BindingValue::Unspecified,
             })
             .collect();
@@ -873,7 +872,7 @@ impl LowLevelSnmp2cClient {
             options,
         ).await?;
 
-        let min_oid_opt = oids.iter().min().map(|o| o.clone());
+        let min_oid_opt = oids.iter().min().copied();
         self.process_bulk_results(pdu, min_oid_opt, false)
     }
 
@@ -1057,7 +1056,7 @@ impl LowLevelSnmp2cClient {
             }
         }
 
-        if ret.len() == 0 {
+        if ret.is_empty()  {
             // well that's disappointing
             // maybe it is directly a value?
 

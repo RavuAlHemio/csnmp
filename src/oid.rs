@@ -89,7 +89,7 @@ impl ObjectIdentifier {
         if MAX_SUB_IDENTIFIER_COUNT != 128 {
             panic!("MAX_SUB_IDENTIFIER_COUNT has changed!");
         }
-        if length <= 0 && sub_identifiers[0] != 0 { panic!("item at index 0 is beyond length but not 0"); }
+        if length == 0 && sub_identifiers[0] != 0 { panic!("item at index 0 is beyond length but not 0"); }
         if length <= 1 && sub_identifiers[1] != 0 { panic!("item at index 1 is beyond length but not 0"); }
         if length <= 2 && sub_identifiers[2] != 0 { panic!("item at index 2 is beyond length but not 0"); }
         if length <= 3 && sub_identifiers[3] != 0 { panic!("item at index 3 is beyond length but not 0"); }
@@ -230,6 +230,12 @@ impl ObjectIdentifier {
         self.length
     }
 
+    /// Returns true if the object identifier has a length of 0.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Obtains the sub-identifier at the given index, or `None` if the index is out of bounds.
     pub fn get(&self, index: usize) -> Option<u32> {
         if index < self.length {
@@ -261,7 +267,7 @@ impl ObjectIdentifier {
         if self.length == MAX_SUB_IDENTIFIER_COUNT {
             None
         } else {
-            let mut sub_identifiers = self.sub_identifiers.clone();
+            let mut sub_identifiers = self.sub_identifiers;
             sub_identifiers[self.length] = sub_id;
             Some(Self {
                 length: self.length + 1,
@@ -289,7 +295,7 @@ impl ObjectIdentifier {
     /// Returns whether this object identifier is a prefix of another object identifier or equal to
     /// it.
     pub fn is_prefix_of_or_equal(&self, other: &Self) -> bool {
-        other.tail_slice(&self).is_some()
+        other.tail_slice(self).is_some()
     }
 
     /// Returns whether this object identifier is a prefix of another object identifier. Returns
@@ -350,8 +356,8 @@ impl FromStr for ObjectIdentifier {
         let stripped = stripped_start.strip_suffix('.').unwrap_or(stripped_start);
 
         // split on dots
-        let pieces: Vec<&str> = if stripped.len() > 0 {
-            stripped.split(".").collect()
+        let pieces: Vec<&str> = if !stripped.is_empty() {
+            stripped.split('.').collect()
         } else {
             Vec::new()
         };
@@ -363,7 +369,7 @@ impl FromStr for ObjectIdentifier {
         }
 
         let mut sub_identifiers = [0u32; MAX_SUB_IDENTIFIER_COUNT];
-        if stripped.len() > 0 {
+        if !stripped.is_empty() {
             for (index, piece) in pieces.iter().enumerate() {
                 sub_identifiers[index] = piece.parse()
                     .map_err(|_| ObjectIdentifierConversionError::InvalidSubIdString {
@@ -389,9 +395,7 @@ impl TryFrom<&[u32]> for ObjectIdentifier {
             });
         }
         let mut sub_identifiers = [0u32; MAX_SUB_IDENTIFIER_COUNT];
-        for i in 0..value.len() {
-            sub_identifiers[i] = value[i];
-        }
+        sub_identifiers[..value.len()].copy_from_slice(value);
         Ok(Self {
             length: value.len(),
             sub_identifiers,
