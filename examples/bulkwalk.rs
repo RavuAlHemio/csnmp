@@ -34,11 +34,7 @@ async fn run() -> ExitCode {
     ).await;
     let client = client_res.expect("failed to create SNMP client");
 
-    let results_res = client.walk_bulk(
-        &top_oid,
-        0,
-        10,
-    ).await;
+    let results_res = client.walk_bulk(&top_oid, 10).await;
     let results = results_res.expect("failed to bulk-walk");
 
     for (oid, value) in results {
