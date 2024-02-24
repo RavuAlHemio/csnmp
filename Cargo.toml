@@ -1,6 +1,6 @@
 [package]
 name = "csnmp"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "CC0-1.0"
 description = "Community-based async (Tokio) SNMP client library"
@@ -11,12 +11,12 @@ keywords = ["snmp", "async", "tokio"]
 [dependencies]
 derivative = { version = "2.2" }
 der-parser = { version = "8.2" }
-from-to-repr = { version = "0.1" }
+from-to-repr = { version = "0.2" }
 nom = { version = "7.1" }
-tokio = { version = "1.20", features = ["net", "time"] }
+tokio = { version = "1.35", features = ["net", "time"] }
 tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 dhat = { version = "0.3" }
-tokio = { version = "1.20", features = ["full"] }
+tokio = { version = "1.35", features = ["full"] }
 tracing-subscriber = { version = "0.3" }
