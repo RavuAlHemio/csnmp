@@ -270,37 +270,22 @@ impl ObjectIdentifier {
         }
     }
 
-    /// If `prefix` is a prefix of or equal to this OID, returns a slice containing the items
-    /// following this prefix; otherwise, returns `None`.
+    /// If `prefix` is a prefix of or equal to this OID, returns a slice containing the
+    /// sub-identifiers following this prefix; otherwise, returns `None`.
     fn tail_slice(&self, prefix: &Self) -> Option<&[u32]> {
-        if prefix.len() > self.len() {
-            return None;
-        }
-
-        for i in 0..prefix.len() {
-            if self.sub_identifiers[i] != prefix.sub_identifiers[i] {
-                return None;
-            }
-        }
-
-        Some(&self.as_slice()[prefix.len()..])
+        self.as_slice().strip_prefix(prefix.as_slice())
     }
 
     /// Returns whether this object identifier is a prefix of another object identifier or equal to
     /// it.
     pub fn is_prefix_of_or_equal(&self, other: &Self) -> bool {
-        other.tail_slice(&self).is_some()
+        other.as_slice().starts_with(self.as_slice())
     }
 
     /// Returns whether this object identifier is a prefix of another object identifier. Returns
     /// `false` if the object identifiers are equal.
     pub fn is_prefix_of(&self, other: &Self) -> bool {
-        // same length is also unacceptable
-        if self.len() >= other.len() {
-            return false;
-        }
-
-        self.is_prefix_of_or_equal(other)
+        self.len() < other.len() && other.as_slice().starts_with(self.as_slice())
     }
 
     /// Returns this object identifier relative to the given `base` object identifier. Returns
