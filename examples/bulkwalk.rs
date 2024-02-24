@@ -31,6 +31,7 @@ async fn run() -> ExitCode {
         community,
         Some("0.0.0.0:0".parse().unwrap()),
         None,
+        0,
     ).await;
     let client = client_res.expect("failed to create SNMP client");
 
