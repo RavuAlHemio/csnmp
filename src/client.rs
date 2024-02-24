@@ -126,7 +126,7 @@ impl Snmp2cClient {
         self.low_level_client.get(oid, request_id, &options).await
     }
 
-    /// Obtains the value for multiple specific SNMP objects.
+    /// Obtains the value for multiple specified SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         let options = self.get_operation_options();
@@ -150,6 +150,22 @@ impl Snmp2cClient {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         self.low_level_client.get_bulk(prev_oid, non_repeaters, max_repetitions, request_id, &options).await
+    }
+
+    /// Sets the value for a single SNMP object.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set(&self, oid: ObjectIdentifier, value: ObjectValue) -> Result<ObjectValue, SnmpClientError> {
+        let options = self.get_operation_options();
+        let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.low_level_client.set(oid, value, request_id, &options).await
+    }
+
+    /// Sets the values for multiple specified SNMP objects.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set_multiple<I: IntoIterator<Item = (ObjectIdentifier, ObjectValue)> + fmt::Debug>(&self, oids_values: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+        let options = self.get_operation_options();
+        let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.low_level_client.set_multiple(oids_values, request_id, &options).await
     }
 
     /// Sends a trap message, informing a management station about one or more events.
@@ -637,6 +653,105 @@ impl LowLevelSnmp2cClient {
             version: VERSION_VALUE,
             community: options.community.clone(),
             pdu: Snmp2cPdu::GetRequest(InnerPdu {
+                request_id,
+                error_status: ErrorStatus::NoError,
+                error_index: 0,
+                variable_bindings,
+            }),
+        };
+        let pdu = self.send_receive(
+            &get_message,
+            options.target,
+            options.send_timeout,
+            options.receive_timeout,
+        ).await?;
+
+        if pdu.variable_bindings.len() != binding_count {
+            return Err(SnmpClientError::BindingCount { expected: binding_count, obtained: pdu.variable_bindings });
+        }
+
+        let mut results = BTreeMap::new();
+        for binding in pdu.variable_bindings {
+            let value = match binding.value {
+                BindingValue::Value(v) => v,
+                _ => return Err(SnmpClientError::FailedBinding { binding }),
+            };
+            results.insert(binding.name, value);
+        }
+
+        Ok(results)
+    }
+
+    /// Sets the value for a single SNMP object.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set(
+        &self,
+        oid: ObjectIdentifier,
+        value: ObjectValue,
+        request_id: i32,
+        options: &OperationOptions,
+    ) -> Result<ObjectValue, SnmpClientError> {
+        // prepare Set message
+        let get_message = Snmp2cMessage {
+            version: VERSION_VALUE,
+            community: options.community.clone(),
+            pdu: Snmp2cPdu::SetRequest(InnerPdu {
+                request_id,
+                error_status: ErrorStatus::NoError,
+                error_index: 0,
+                variable_bindings: vec![
+                    VariableBinding {
+                        name: oid,
+                        value: BindingValue::Value(value),
+                    },
+                ],
+            }),
+        };
+        let mut pdu = self.send_receive(
+            &get_message,
+            options.target,
+            options.send_timeout,
+            options.receive_timeout,
+        ).await?;
+
+        if pdu.variable_bindings.len() != 1 {
+            return Err(SnmpClientError::BindingCount { expected: 1, obtained: pdu.variable_bindings });
+        }
+        let binding = pdu.variable_bindings.remove(0);
+
+        if binding.name != oid {
+            return Err(SnmpClientError::UnexpectedValue { expected: oid, obtained: vec![binding] });
+        }
+
+        let value = match binding.value {
+            BindingValue::Value(v) => v,
+            _ => return Err(SnmpClientError::FailedBinding { binding }),
+        };
+
+        Ok(value)
+    }
+
+    /// Sets the values for multiple specified SNMP objects.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set_multiple<I: IntoIterator<Item = (ObjectIdentifier, ObjectValue)> + fmt::Debug>(
+        &self,
+        oids_values: I,
+        request_id: i32,
+        options: &OperationOptions,
+    ) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+        // prepare Get message
+        let variable_bindings: Vec<VariableBinding> = oids_values
+            .into_iter()
+            .map(|(oid, value)| VariableBinding {
+                name: oid,
+                value: BindingValue::Value(value),
+            })
+            .collect();
+        let binding_count = variable_bindings.len();
+        let get_message = Snmp2cMessage {
+            version: VERSION_VALUE,
+            community: options.community.clone(),
+            pdu: Snmp2cPdu::SetRequest(InnerPdu {
                 request_id,
                 error_status: ErrorStatus::NoError,
                 error_index: 0,
