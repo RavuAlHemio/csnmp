@@ -5,11 +5,11 @@
 #[macro_export]
 macro_rules! make_oid {
     () => {
-        $crate::oid::ObjectIdentifier::new(0, [0u32; $crate::oid::MAX_SUB_IDENTIFIER_COUNT])
+        $crate::oid::ObjectIdentifier::new(0, [0u32; $crate::oid::MAX_ARC_COUNT])
     };
     ($firstnum:literal $(, $nextnums:literal)*) => {
         {
-            let mut arcs = [0u32; $crate::oid::MAX_SUB_IDENTIFIER_COUNT];
+            let mut arcs = [0u32; $crate::oid::MAX_ARC_COUNT];
             let mut length = 0;
             make_oid!(@store_numbers, arcs, length, $firstnum $(, $nextnums)*);
             $crate::oid::ObjectIdentifier::new(length, arcs)
