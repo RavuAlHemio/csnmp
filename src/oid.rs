@@ -474,6 +474,29 @@ mod tests {
     }
 
     #[test]
+    fn test_tail_slice() {
+        let empty = ObjectIdentifier::try_from(&[][..]).unwrap();
+        let base = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1][..]).unwrap();
+        let child = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1, 1][..]).unwrap();
+        let descendant = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1, 1, 2, 3, 4, 5][..]).unwrap();
+        let different = ObjectIdentifier::try_from(&[3, 2, 1][..]).unwrap();
+        let half_different = ObjectIdentifier::try_from(&[1, 3, 4][..]).unwrap();
+
+        // Other is not a prefix. Return None.
+        assert_eq!(base.tail_slice(&child), None);
+        assert_eq!(base.tail_slice(&descendant), None);
+        assert_eq!(base.tail_slice(&different), None);
+        assert_eq!(base.tail_slice(&half_different), None);
+        assert_eq!(empty.tail_slice(&base), None);
+        // Other is empty. Returns self.
+        assert_eq!(base.tail_slice(&empty), Some(base.as_slice()));
+        assert_eq!(empty.tail_slice(&empty), Some(empty.as_slice()));
+        // Other is a prefix. Return tail.
+        assert_eq!(child.tail_slice(&base), Some(&[1][..]));
+        assert_eq!(descendant.tail_slice(&base), Some(&[1, 2, 3, 4, 5][..]));
+    }
+
+    #[test]
     fn test_prefix() {
         let base = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1][..]).unwrap();
         let child = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1, 1][..]).unwrap();
