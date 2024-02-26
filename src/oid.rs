@@ -270,37 +270,22 @@ impl ObjectIdentifier {
         }
     }
 
-    /// If `prefix` is a prefix of or equal to this OID, returns a slice containing the items
-    /// following this prefix; otherwise, returns `None`.
+    /// If `prefix` is a prefix of or equal to this OID, returns a slice containing the
+    /// sub-identifiers following this prefix; otherwise, returns `None`.
     fn tail_slice(&self, prefix: &Self) -> Option<&[u32]> {
-        if prefix.len() > self.len() {
-            return None;
-        }
-
-        for i in 0..prefix.len() {
-            if self.sub_identifiers[i] != prefix.sub_identifiers[i] {
-                return None;
-            }
-        }
-
-        Some(&self.as_slice()[prefix.len()..])
+        self.as_slice().strip_prefix(prefix.as_slice())
     }
 
     /// Returns whether this object identifier is a prefix of another object identifier or equal to
     /// it.
     pub fn is_prefix_of_or_equal(&self, other: &Self) -> bool {
-        other.tail_slice(&self).is_some()
+        other.as_slice().starts_with(self.as_slice())
     }
 
     /// Returns whether this object identifier is a prefix of another object identifier. Returns
     /// `false` if the object identifiers are equal.
     pub fn is_prefix_of(&self, other: &Self) -> bool {
-        // same length is also unacceptable
-        if self.len() >= other.len() {
-            return false;
-        }
-
-        self.is_prefix_of_or_equal(other)
+        self.len() < other.len() && other.as_slice().starts_with(self.as_slice())
     }
 
     /// Returns this object identifier relative to the given `base` object identifier. Returns
@@ -471,6 +456,29 @@ mod tests {
 
         let long = ObjectIdentifier::try_from(&[1; 128][..]).unwrap();
         assert_eq!(None, long.child(2));
+    }
+
+    #[test]
+    fn test_tail_slice() {
+        let empty = ObjectIdentifier::try_from(&[][..]).unwrap();
+        let base = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1][..]).unwrap();
+        let child = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1, 1][..]).unwrap();
+        let descendant = ObjectIdentifier::try_from(&[1, 3, 6, 1, 4, 1, 1, 2, 3, 4, 5][..]).unwrap();
+        let different = ObjectIdentifier::try_from(&[3, 2, 1][..]).unwrap();
+        let half_different = ObjectIdentifier::try_from(&[1, 3, 4][..]).unwrap();
+
+        // Other is not a prefix. Return None.
+        assert_eq!(base.tail_slice(&child), None);
+        assert_eq!(base.tail_slice(&descendant), None);
+        assert_eq!(base.tail_slice(&different), None);
+        assert_eq!(base.tail_slice(&half_different), None);
+        assert_eq!(empty.tail_slice(&base), None);
+        // Other is empty. Returns self.
+        assert_eq!(base.tail_slice(&empty), Some(base.as_slice()));
+        assert_eq!(empty.tail_slice(&empty), Some(empty.as_slice()));
+        // Other is a prefix. Return tail.
+        assert_eq!(child.tail_slice(&base), Some(&[1][..]));
+        assert_eq!(descendant.tail_slice(&base), Some(&[1, 2, 3, 4, 5][..]));
     }
 
     #[test]
