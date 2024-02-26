@@ -48,11 +48,12 @@ pub struct Snmp2cClient {
     community: Vec<u8>,
     request_id: AtomicI32,
     timeout: Option<Duration>,
+    retries: usize,
 }
 impl Snmp2cClient {
     /// Creates a new SNMP2c client.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn new(target: SocketAddr, community: Vec<u8>, bind_addr: Option<SocketAddr>, timeout: Option<Duration>) -> Result<Self, SnmpClientError> {
+    pub async fn new(target: SocketAddr, community: Vec<u8>, bind_addr: Option<SocketAddr>, timeout: Option<Duration>, retries: usize) -> Result<Self, SnmpClientError> {
         let low_level_client = LowLevelSnmp2cClient::new(
             bind_addr,
             timeout,
@@ -64,6 +65,7 @@ impl Snmp2cClient {
             community,
             request_id: AtomicI32::new(0),
             timeout,
+            retries,
         })
     }
 
@@ -108,6 +110,14 @@ impl Snmp2cClient {
     /// it gives up.
     pub fn set_timeout(&mut self, new_timeout: Option<Duration>) { self.timeout = new_timeout; }
 
+    /// Returns the number of additional attempts to send the same message if the first attempt
+    /// produces no reaction.
+    pub fn retries(&self) -> usize { self.retries }
+
+    /// Changes the number of additional attempts to send the same message if the first attempt
+    /// produces no reaction.
+    pub fn set_retries(&mut self, new_retries: usize) { self.retries = new_retries; }
+
     /// Obtains the options that guide the request.
     fn get_operation_options(&self) -> OperationOptions {
         OperationOptions {
@@ -115,6 +125,7 @@ impl Snmp2cClient {
             send_timeout: self.timeout(),
             receive_timeout: self.timeout(),
             community: self.community.clone(),
+            retries: self.retries(),
         }
     }
 
@@ -126,7 +137,7 @@ impl Snmp2cClient {
         self.low_level_client.get(oid, request_id, &options).await
     }
 
-    /// Obtains the value for multiple specific SNMP objects.
+    /// Obtains the value for multiple specified SNMP objects.
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get_multiple<I: IntoIterator<Item = ObjectIdentifier> + fmt::Debug>(&self, oids: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         let options = self.get_operation_options();
@@ -145,11 +156,37 @@ impl Snmp2cClient {
 
     /// Obtains the values for the next objects in the tree relative to the given OID. This is a
     /// low-level operation, used as a building block for [`walk_bulk`].
+    ///
+    /// The `non_repeaters` value declares how many OIDs in `oids` will only return one value
+    /// instead of a subtree. These OIDs must be placed at the beginning of `oids`. For example, you
+    /// may wish to simultaneously query `sysUpTime` (single value) and `ifName` (a whole subtree)
+    /// by passing them in this order in `oids` and setting `non_repeaters` to 1. Of course, it
+    /// makes little sense to set `non_repeaters` to a higher value than there are OIDs in `oids`.
+    ///
+    /// The `max_repetitions` value sets the maximum number of values to be returned in one
+    /// response. Agents may return fewer values if the full amount would not fit into an SNMP
+    /// response.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn get_bulk(&self, prev_oid: ObjectIdentifier, non_repeaters: u32, max_repetitions: u32) -> Result<GetBulkResult, SnmpClientError> {
+    pub async fn get_bulk(&self, oids: &[ObjectIdentifier], non_repeaters: u32, max_repetitions: u32) -> Result<GetBulkResult, SnmpClientError> {
         let options = self.get_operation_options();
         let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
-        self.low_level_client.get_bulk(prev_oid, non_repeaters, max_repetitions, request_id, &options).await
+        self.low_level_client.get_bulk(oids, non_repeaters, max_repetitions, request_id, &options).await
+    }
+
+    /// Sets the value for a single SNMP object.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set(&self, oid: ObjectIdentifier, value: ObjectValue) -> Result<ObjectValue, SnmpClientError> {
+        let options = self.get_operation_options();
+        let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.low_level_client.set(oid, value, request_id, &options).await
+    }
+
+    /// Sets the values for multiple specified SNMP objects.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set_multiple<I: IntoIterator<Item = (ObjectIdentifier, ObjectValue)> + fmt::Debug>(&self, oids_values: I) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+        let options = self.get_operation_options();
+        let request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        self.low_level_client.set_multiple(oids_values, request_id, &options).await
     }
 
     /// Sends a trap message, informing a management station about one or more events.
@@ -189,21 +226,19 @@ impl Snmp2cClient {
     ///
     /// This is a high-level operation using [`get_bulk`] (and, optionally, [`get`]) under the hood.
     ///
-    /// You can generally set `non_repeaters` to 0. Tune `max_repetitions` to your liking; 10 is a
-    /// good starting value.
+    /// Tune `max_repetitions` to your liking; 10 is a good starting value.
     ///
     /// Since [`get_bulk`] is functionally equivalent to [`get_next`] but fetches multiple values at
     /// once, [`walk_bulk`] is more efficient than [`walk`]. However, some SNMP agents may be buggy
     /// and provide different results to a [`get_bulk`] operation than to an equivalent sequence of
     /// [`get_next`] operations. Therefore, [`walk`] is still provided.
     #[cfg_attr(feature = "tracing", instrument)]
-    pub async fn walk_bulk(&self, top_oid: ObjectIdentifier, non_repeaters: u32, max_repetitions: u32) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+    pub async fn walk_bulk(&self, top_oid: ObjectIdentifier, max_repetitions: u32) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
         // request_id is increased multiple times; cope with that
         let options = self.get_operation_options();
         let mut request_id = self.request_id.fetch_add(1, Ordering::SeqCst);
         let values = self.low_level_client.walk_bulk(
             top_oid,
-            non_repeaters,
             max_repetitions,
             &mut request_id,
             &options,
@@ -366,6 +401,10 @@ pub struct OperationOptions {
     /// The community string used for SNMP2c authentication.
     #[derivative(Debug="ignore")]
     pub community: Vec<u8>,
+
+    /// The number of additional attempts to perform if no response is received after the first
+    /// attempt.
+    pub retries: usize,
 }
 
 
@@ -427,9 +466,9 @@ impl LowLevelSnmp2cClient {
         Ok(())
     }
 
-    /// Performs the sending and receiving of an SNMP message.
+    /// Performs one attempt at sending and receiving of an SNMP message.
     #[cfg_attr(feature = "tracing", instrument)]
-    async fn send_receive(
+    async fn single_send_receive(
         &self,
         outgoing: &Snmp2cMessage,
         target: SocketAddr,
@@ -510,9 +549,34 @@ impl LowLevelSnmp2cClient {
         }
     }
 
+    /// Performs the sending and receiving of an SNMP message.
+    #[cfg_attr(feature = "tracing", instrument)]
+    async fn send_receive(
+        &self,
+        outgoing: &Snmp2cMessage,
+        options: &OperationOptions,
+    ) -> Result<InnerPdu, SnmpClientError> {
+        for _attempt in 0..(options.retries+1) {
+            let send_receive_result = self.single_send_receive(
+                outgoing,
+                options.target,
+                options.send_timeout,
+                options.receive_timeout,
+            ).await;
+            match send_receive_result {
+                Ok(p) => return Ok(p),
+                Err(SnmpClientError::TimedOut {}) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        // all attempts failed; return the timeouts we ignored until now
+        Err(SnmpClientError::TimedOut {})
+    }
+
     /// Processes the results of an operation that can return multiple values.
     ///
-    /// If `prev_oid_opt` is `None`, the check whether all bindings have OIDs greater than this
+    /// If `min_oid_opt` is `None`, the check whether all bindings have OIDs greater than this
     /// value is skipped.
     ///
     /// If `ensure_increasing` is `true` and an OID is encountered that is not greater than the
@@ -521,7 +585,7 @@ impl LowLevelSnmp2cClient {
     fn process_bulk_results(
         &self,
         pdu: InnerPdu,
-        prev_oid_opt: Option<ObjectIdentifier>,
+        min_oid_opt: Option<ObjectIdentifier>,
         ensure_increasing: bool,
     ) -> Result<GetBulkResult, SnmpClientError> {
         let mut values = BTreeMap::new();
@@ -529,9 +593,9 @@ impl LowLevelSnmp2cClient {
         let mut last_oid_opt = None;
 
         for binding in &pdu.variable_bindings {
-            if let Some(prev_oid) = prev_oid_opt {
-                if binding.name <= prev_oid {
-                    return Err(SnmpClientError::PrecedingValue { previous_oid: prev_oid, obtained: pdu.variable_bindings });
+            if let Some(min_oid) = min_oid_opt {
+                if binding.name <= min_oid {
+                    return Err(SnmpClientError::PrecedingValue { previous_oid: min_oid, obtained: pdu.variable_bindings });
                 }
             }
 
@@ -594,9 +658,7 @@ impl LowLevelSnmp2cClient {
         };
         let mut pdu = self.send_receive(
             &get_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != 1 {
@@ -645,9 +707,102 @@ impl LowLevelSnmp2cClient {
         };
         let pdu = self.send_receive(
             &get_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
+        ).await?;
+
+        if pdu.variable_bindings.len() != binding_count {
+            return Err(SnmpClientError::BindingCount { expected: binding_count, obtained: pdu.variable_bindings });
+        }
+
+        let mut results = BTreeMap::new();
+        for binding in pdu.variable_bindings {
+            let value = match binding.value {
+                BindingValue::Value(v) => v,
+                _ => return Err(SnmpClientError::FailedBinding { binding }),
+            };
+            results.insert(binding.name, value);
+        }
+
+        Ok(results)
+    }
+
+    /// Sets the value for a single SNMP object.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set(
+        &self,
+        oid: ObjectIdentifier,
+        value: ObjectValue,
+        request_id: i32,
+        options: &OperationOptions,
+    ) -> Result<ObjectValue, SnmpClientError> {
+        // prepare Set message
+        let get_message = Snmp2cMessage {
+            version: VERSION_VALUE,
+            community: options.community.clone(),
+            pdu: Snmp2cPdu::SetRequest(InnerPdu {
+                request_id,
+                error_status: ErrorStatus::NoError,
+                error_index: 0,
+                variable_bindings: vec![
+                    VariableBinding {
+                        name: oid,
+                        value: BindingValue::Value(value),
+                    },
+                ],
+            }),
+        };
+        let mut pdu = self.send_receive(
+            &get_message,
+            options,
+        ).await?;
+
+        if pdu.variable_bindings.len() != 1 {
+            return Err(SnmpClientError::BindingCount { expected: 1, obtained: pdu.variable_bindings });
+        }
+        let binding = pdu.variable_bindings.remove(0);
+
+        if binding.name != oid {
+            return Err(SnmpClientError::UnexpectedValue { expected: oid, obtained: vec![binding] });
+        }
+
+        let value = match binding.value {
+            BindingValue::Value(v) => v,
+            _ => return Err(SnmpClientError::FailedBinding { binding }),
+        };
+
+        Ok(value)
+    }
+
+    /// Sets the values for multiple specified SNMP objects.
+    #[cfg_attr(feature = "tracing", instrument)]
+    pub async fn set_multiple<I: IntoIterator<Item = (ObjectIdentifier, ObjectValue)> + fmt::Debug>(
+        &self,
+        oids_values: I,
+        request_id: i32,
+        options: &OperationOptions,
+    ) -> Result<BTreeMap<ObjectIdentifier, ObjectValue>, SnmpClientError> {
+        // prepare Get message
+        let variable_bindings: Vec<VariableBinding> = oids_values
+            .into_iter()
+            .map(|(oid, value)| VariableBinding {
+                name: oid,
+                value: BindingValue::Value(value),
+            })
+            .collect();
+        let binding_count = variable_bindings.len();
+        let get_message = Snmp2cMessage {
+            version: VERSION_VALUE,
+            community: options.community.clone(),
+            pdu: Snmp2cPdu::SetRequest(InnerPdu {
+                request_id,
+                error_status: ErrorStatus::NoError,
+                error_index: 0,
+                variable_bindings,
+            }),
+        };
+        let pdu = self.send_receive(
+            &get_message,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != binding_count {
@@ -693,9 +848,7 @@ impl LowLevelSnmp2cClient {
         };
         let mut pdu = self.send_receive(
             &get_next_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         if pdu.variable_bindings.len() != 1 {
@@ -718,16 +871,31 @@ impl LowLevelSnmp2cClient {
 
     /// Obtains the values for the next objects in the tree relative to the given OID. This is a
     /// low-level operation, used as a building block for [`walk_bulk`].
+    ///
+    /// The `non_repeaters` value declares how many OIDs in `oids` will only return one value
+    /// instead of a subtree. These OIDs must be placed at the beginning of `oids`. For example, you
+    /// may wish to simultaneously query `sysUpTime` (single value) and `ifName` (a whole subtree)
+    /// by passing them in this order in `oids` and setting `non_repeaters` to 1. Of course, it
+    /// makes little sense to set `non_repeaters` to a higher value than there are OIDs in `oids`.
+    ///
+    /// The `max_repetitions` value sets the number of values to be returned in one response. Agents
+    /// are supposed to truncate responses that don't fit.
     #[cfg_attr(feature = "tracing", instrument)]
     pub async fn get_bulk(
         &self,
-        prev_oid: ObjectIdentifier,
+        oids: &[ObjectIdentifier],
         non_repeaters: u32,
         max_repetitions: u32,
         request_id: i32,
         options: &OperationOptions,
     ) -> Result<GetBulkResult, SnmpClientError> {
         // prepare GetBulk message
+        let variable_bindings: Vec<VariableBinding> = oids.iter()
+            .map(|oid| VariableBinding {
+                name: oid.clone(),
+                value: BindingValue::Unspecified,
+            })
+            .collect();
         let get_bulk_message = Snmp2cMessage {
             version: VERSION_VALUE,
             community: options.community.clone(),
@@ -735,22 +903,16 @@ impl LowLevelSnmp2cClient {
                 request_id,
                 non_repeaters,
                 max_repetitions,
-                variable_bindings: vec![
-                    VariableBinding {
-                        name: prev_oid,
-                        value: BindingValue::Unspecified,
-                    },
-                ],
+                variable_bindings,
             }),
         };
         let pdu = self.send_receive(
             &get_bulk_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
-        self.process_bulk_results(pdu, Some(prev_oid), false)
+        let min_oid_opt = oids.iter().min().map(|o| o.clone());
+        self.process_bulk_results(pdu, min_oid_opt, false)
     }
 
     /// Sends a trap message, informing a management station about one or more events.
@@ -815,9 +977,7 @@ impl LowLevelSnmp2cClient {
         };
         let pdu = self.send_receive(
             &inform_message,
-            options.target,
-            options.send_timeout,
-            options.receive_timeout,
+            options,
         ).await?;
 
         // handle this similarly to Get-Bulk
@@ -889,8 +1049,7 @@ impl LowLevelSnmp2cClient {
     ///
     /// This is a high-level operation using [`get_bulk`] (and, optionally, [`get`]) under the hood.
     ///
-    /// You can generally set `non_repeaters` to 0. Tune `max_repetitions` to your liking; 10 is a
-    /// good starting value.
+    /// Tune `max_repetitions` to your liking; 10 is a good starting value.
     ///
     /// Since [`get_bulk`] is functionally equivalent to [`get_next`] but fetches multiple values at
     /// once, [`walk_bulk`] is more efficient than [`walk`]. However, some SNMP agents may be buggy
@@ -900,7 +1059,6 @@ impl LowLevelSnmp2cClient {
     pub async fn walk_bulk(
         &self,
         top_oid: ObjectIdentifier,
-        non_repeaters: u32,
         max_repetitions: u32,
         request_id: &mut i32,
         options: &OperationOptions,
@@ -910,7 +1068,7 @@ impl LowLevelSnmp2cClient {
         // keep calling get_bulk until one of the OIDs is no longer under top_oid
         let mut cur_oid = top_oid;
         loop {
-            let get_bulk_result = self.get_bulk(cur_oid, non_repeaters, max_repetitions, *request_id, options).await;
+            let get_bulk_result = self.get_bulk(&[cur_oid], 0, max_repetitions, *request_id, options).await;
             *request_id += 1;
             match get_bulk_result {
                 Ok(get_bulk_result) => {

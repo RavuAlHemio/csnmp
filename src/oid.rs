@@ -331,21 +331,12 @@ impl fmt::Display for ObjectIdentifier {
 }
 impl PartialOrd for ObjectIdentifier {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // compare up to the common length
-        let shorter_length = self.length.min(other.length);
-        for i in 0..shorter_length {
-            let comparison = self.sub_identifiers[i].cmp(&other.sub_identifiers[i]);
-            if comparison != Ordering::Equal {
-                return Some(comparison);
-            }
-        }
-        // one is a prefix of the other; compare by length
-        Some(self.length.cmp(&other.length))
+        Some(self.cmp(other))
     }
 }
 impl Ord for ObjectIdentifier {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap()
+        self.sub_identifiers[..self.length].cmp(&other.sub_identifiers[..other.length])
     }
 }
 impl FromStr for ObjectIdentifier {
@@ -502,5 +493,32 @@ mod tests {
         tfs(&[3, 2, 1], "3.2.1");
         tfs(&[1, 3, 4], "1.3.4");
         tfs(&[1, 3, 4, 4294967295, 1], "1.3.4.4294967295.1");
+    }
+
+    #[test]
+    fn test_cmp() {
+        let oid_empty = ObjectIdentifier::from_str("").unwrap();
+        let oid23 = ObjectIdentifier::from_str("2.3").unwrap();
+        let oid310 = ObjectIdentifier::from_str("3.1.0").unwrap();
+        let oid32 = ObjectIdentifier::from_str("3.2").unwrap();
+        let oid320 = ObjectIdentifier::from_str("3.2.0").unwrap();
+        let oid_max_long = ObjectIdentifier::new(
+            MAX_SUB_IDENTIFIER_COUNT,
+            [u32::MAX; MAX_SUB_IDENTIFIER_COUNT],
+        );
+
+        // Different common prefix, different length
+        assert_eq!(oid32.cmp(&oid310), Ordering::Greater);
+        assert_eq!(oid310.cmp(&oid32), Ordering::Less);
+        // Different common prefix, same length
+        assert_eq!(oid32.cmp(&oid23), Ordering::Greater);
+        assert_eq!(oid23.cmp(&oid32), Ordering::Less);
+        // Same common prefix, different length
+        assert_eq!(oid320.cmp(&oid32), Ordering::Greater);
+        assert_eq!(oid32.cmp(&oid320), Ordering::Less);
+        // Same common prefix, same length (a.k.a. equal)
+        assert_eq!(oid_empty.cmp(&oid_empty), Ordering::Equal);
+        assert_eq!(oid310.cmp(&oid310), Ordering::Equal);
+        assert_eq!(oid_max_long.cmp(&oid_max_long), Ordering::Equal);
     }
 }
