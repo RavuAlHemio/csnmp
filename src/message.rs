@@ -216,11 +216,11 @@ trait Asn1BlockExtensions: Sized {
     /// Attempts to decode the block as an integer and convert it to a [`BigUint`].
     fn as_big_uint(&self) -> Result<BigUint, SnmpMessageError>;
 
-    /// Attempts to decode the block as an octet string and return it as a reference to a `Vec<u8>`.
-    fn as_bytes(&self) -> Result<&Vec<u8>, SnmpMessageError>;
+    /// Attempts to decode the block as an octet string and return it as a reference to a `[u8]`.
+    fn as_bytes(&self) -> Result<&[u8], SnmpMessageError>;
 
-    /// Attempts to decode the block a sequence and return it as a reference to a `Vec<Self>`.
-    fn as_sequence(&self) -> Result<&Vec<Self>, SnmpMessageError>;
+    /// Attempts to decode the block a sequence and return it as a reference to a `[Self]`.
+    fn as_sequence(&self) -> Result<&[Self], SnmpMessageError>;
 
     /// Attempts to decode the block an object identifier.
     fn as_oid(&self) -> Result<&OID, SnmpMessageError>;
@@ -302,7 +302,7 @@ impl Asn1BlockExtensions for ASN1Block {
         }
     }
 
-    fn as_bytes(&self) -> Result<&Vec<u8>, SnmpMessageError> {
+    fn as_bytes(&self) -> Result<&[u8], SnmpMessageError> {
         if let Self::OctetString(_offset, bytes) = self {
             Ok(bytes)
         } else {
@@ -313,7 +313,7 @@ impl Asn1BlockExtensions for ASN1Block {
         }
     }
 
-    fn as_sequence(&self) -> Result<&Vec<Self>, SnmpMessageError> {
+    fn as_sequence(&self) -> Result<&[Self], SnmpMessageError> {
         if let Self::Sequence(_offset, blocks) = self {
             Ok(blocks)
         } else {
@@ -407,7 +407,7 @@ impl FromASN1 for Snmp2cMessage {
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
         SnmpMessageError::check_min_length(&v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 3)?;
+        SnmpMessageError::check_length(seq, 3)?;
 
         let version = seq[0].as_i64()?;
         if version != VERSION_VALUE {
@@ -416,7 +416,7 @@ impl FromASN1 for Snmp2cMessage {
                 obtained: version,
             });
         }
-        let community = seq[1].as_bytes()?.clone();
+        let community = seq[1].as_bytes()?.to_vec();
         let (pdu, _rest) = Snmp2cPdu::from_asn1(&seq[2..3])?;
 
         let message = Self {
@@ -579,7 +579,7 @@ impl FromASN1 for InnerPdu {
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
         SnmpMessageError::check_min_length(&v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 4)?;
+        SnmpMessageError::check_length(seq, 4)?;
 
         let request_id = seq[0].as_i32()?;
         let error_status = ErrorStatus::try_from(seq[1].as_u8()?)
@@ -635,7 +635,7 @@ impl FromASN1 for BulkPdu {
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
         SnmpMessageError::check_min_length(&v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 4)?;
+        SnmpMessageError::check_length(seq, 4)?;
 
         let request_id = seq[0].as_i32()?;
         let non_repeaters = seq[1].as_u32()?;
@@ -688,7 +688,7 @@ impl FromASN1 for VariableBinding {
     fn from_asn1(v: &[ASN1Block]) -> Result<(Self, &[ASN1Block]), Self::Error> {
         SnmpMessageError::check_min_length(&v, 1)?;
         let seq = v[0].as_sequence()?;
-        SnmpMessageError::check_length(&seq, 2)?;
+        SnmpMessageError::check_length(seq, 2)?;
 
         let name_asn1 = seq[0].as_oid()?;
         let name = ObjectIdentifier::try_from(name_asn1)
@@ -859,10 +859,10 @@ impl ObjectValue {
         }
     }
 
-    /// Returns [`Some(&Vec<u8>)`] if this `ObjectValue` is a [`String`][ObjectValue::String] or
+    /// Returns [`Some(&[u8])`] if this `ObjectValue` is a [`String`][ObjectValue::String] or
     /// [`Opaque`][ObjectValue::Opaque]; otherwise, returns [`None`].
     #[allow(dead_code)]
-    pub fn as_bytes(&self) -> Option<&Vec<u8>> {
+    pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::String(s) => Some(s),
             Self::Opaque(o) => Some(o),
@@ -1079,7 +1079,7 @@ mod tests {
         }
     }
 
-    fn gimme_octets(bind: &VariableBinding) -> &Vec<u8> {
+    fn gimme_octets(bind: &VariableBinding) -> &[u8] {
         match &bind.value {
             BindingValue::Value(ObjectValue::String(bs)) => bs,
             _ => panic!("want octets, got {:?}", bind.value),
