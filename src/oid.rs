@@ -422,7 +422,7 @@ impl TryFrom<&ObjectIdentifier> for OID {
 
 
 /// The zero-zero OID (0.0), indicating the absence of an OID.
-pub const ZERO_ZERO_OID: ObjectIdentifier = ObjectIdentifier::new(0, [0; MAX_SUB_IDENTIFIER_COUNT]);
+pub const ZERO_ZERO_OID: ObjectIdentifier = ObjectIdentifier::new(2, [0; MAX_SUB_IDENTIFIER_COUNT]);
 
 
 #[cfg(test)]
