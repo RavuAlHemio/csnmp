@@ -403,17 +403,46 @@ mod tests {
     fn test_parse() {
         fn tfs(slice: &[u32], string: &str) {
             let parsed: ObjectIdentifier = string.parse().unwrap();
-            assert_eq!(parsed.as_slice(), slice);
+            assert_eq!(parsed.as_slice(), slice, "when parsing \"{string}\"");
         }
 
         tfs(&[], "");
+        tfs(&[], ".");
+        tfs(&[], "..");
         tfs(&[1], "1");
+        tfs(&[1], ".1.");
         tfs(&[1, 3, 6, 1, 4, 1], "1.3.6.1.4.1");
-        tfs(&[1, 3, 6, 1, 4, 1, 1], "1.3.6.1.4.1.1");
-        tfs(&[1, 3, 6, 1, 4, 1, 1, 2, 3, 4, 5], "1.3.6.1.4.1.1.2.3.4.5");
-        tfs(&[3, 2, 1], "3.2.1");
-        tfs(&[1, 3, 4], "1.3.4");
         tfs(&[1, 3, 4, 4294967295, 1], "1.3.4.4294967295.1");
+        let max_length = ".1".repeat(MAX_SUB_IDENTIFIER_COUNT);
+        tfs([1u32; MAX_SUB_IDENTIFIER_COUNT].as_slice(), &max_length);
+
+        use ObjectIdentifierConversionError as OICE;
+        fn tfs_err(err: OICE, string: &str) {
+            let parsed = string.parse::<ObjectIdentifier>();
+            assert_eq!(parsed, Err(err), "when parsing \"{string}\"");
+        }
+
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, "...");
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, "..1.");
+        tfs_err(OICE::InvalidSubIdString { index: 1 }, "1..2");
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, "4294967296");
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, ".4294967296.");
+        let one_too_long = ".1".repeat(MAX_SUB_IDENTIFIER_COUNT + 1);
+        tfs_err(
+            OICE::TooLong {
+                max: MAX_SUB_IDENTIFIER_COUNT,
+                obtained: MAX_SUB_IDENTIFIER_COUNT + 1,
+            },
+            &one_too_long,
+        );
+        let way_too_long = ".1".repeat(MAX_SUB_IDENTIFIER_COUNT * 2);
+        tfs_err(
+            OICE::TooLong {
+                max: MAX_SUB_IDENTIFIER_COUNT,
+                obtained: MAX_SUB_IDENTIFIER_COUNT * 2,
+            },
+            &way_too_long,
+        );
     }
 
     #[test]
