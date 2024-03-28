@@ -208,32 +208,30 @@ impl FromStr for ObjectIdentifier {
         // strip leading and trailing dots
         let stripped_start = s.strip_prefix('.').unwrap_or(s);
         let stripped = stripped_start.strip_suffix('.').unwrap_or(stripped_start);
-
-        // split on dots
-        let pieces: Vec<&str> = if stripped.len() > 0 {
-            stripped.split(".").collect()
-        } else {
-            Vec::new()
-        };
-        if pieces.len() > MAX_SUB_IDENTIFIER_COUNT {
-            return Err(ObjectIdentifierConversionError::TooLong {
-                max: MAX_SUB_IDENTIFIER_COUNT,
-                obtained: pieces.len(),
-            });
+        if stripped.is_empty() {
+            return Ok(Self::default());
         }
 
+        // split on dots
+        let mut index = 0;
         let mut sub_identifiers = [0u32; MAX_SUB_IDENTIFIER_COUNT];
-        if stripped.len() > 0 {
-            for (index, piece) in pieces.iter().enumerate() {
-                sub_identifiers[index] = piece.parse()
-                    .map_err(|_| ObjectIdentifierConversionError::InvalidSubIdString {
-                        index,
-                    })?;
+        let mut pieces_iter = stripped.split('.');
+        for piece in &mut pieces_iter {
+            if index >= MAX_SUB_IDENTIFIER_COUNT {
+                let pieces_left = pieces_iter.count();
+                return Err(ObjectIdentifierConversionError::TooLong {
+                    max: MAX_SUB_IDENTIFIER_COUNT,
+                    obtained: index + 1 + pieces_left,
+                });
             }
+
+            sub_identifiers[index] = piece.parse()
+                .map_err(|_| ObjectIdentifierConversionError::InvalidSubIdString { index })?;
+            index += 1;
         }
 
         Ok(Self {
-            length: pieces.len(),
+            length: index,
             sub_identifiers,
         })
     }
