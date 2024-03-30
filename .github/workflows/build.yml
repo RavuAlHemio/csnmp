@@ -1,0 +1,69 @@
+name: csnmp build
+on: [push]
+jobs:
+  build:
+    strategy:
+      matrix:
+        rust_version: ["1.67", "stable"]
+        build_mode:
+          - mode: debug
+            arg: ""
+          - mode: release
+            arg: "--release"
+        os:
+          - name: archlinux
+            host_os: ubuntu-latest
+            container: archlinux:base-devel
+          - name: ubuntu
+            host_os: ubuntu-latest
+            container: ubuntu:latest
+          - name: windows
+            host_os: windows-latest
+          - name: macos
+            host_os: macos-latest
+      fail-fast: false
+
+    runs-on: ${{ matrix.os.host_os }}
+    container: ${{ matrix.os.container }}
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+
+    steps:
+
+      # update Arch
+      - if: ${{ matrix.os.name == 'archlinux' }}
+        name: update Arch
+        run: pacman -Syu --noconfirm
+      - if: ${{ matrix.os.name == 'archlinux' }}
+        name: install Arch packages
+        run: pacman -S --needed --noconfirm git
+
+      # update Ubuntu
+      - if: ${{ matrix.os.name == 'ubuntu' }}
+        name: update Ubuntu apt database
+        run: apt-get -y update
+      - if: ${{ matrix.os.name == 'ubuntu' }}
+        name: update Ubuntu packages
+        run: apt-get -y dist-upgrade
+      - if: ${{ matrix.os.name == 'ubuntu' }}
+        name: install Ubuntu packages
+        run: apt-get -y install curl build-essential git
+
+      # common steps
+      - if: ${{ matrix.os.name != 'windows' }}
+        name: install rustup
+        run: "curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y"
+      - if: ${{ matrix.os.name != 'windows' }}
+        name: add cargo directory to PATH
+        run: 'echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"'
+      - name: install correct Rust version
+        run: rustup toolchain install ${{ matrix.rust_version }}
+      - name: check out repository code
+        uses: actions/checkout@v4
+      - name: run build
+        run: cargo +${{ matrix.rust_version }} build --all-targets ${{ matrix.build_mode.arg }}
+      - name: run test
+        run: cargo +${{ matrix.rust_version }} test ${{ matrix.build_mode.arg }}
