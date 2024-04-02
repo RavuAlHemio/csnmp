@@ -208,32 +208,30 @@ impl FromStr for ObjectIdentifier {
         // strip leading and trailing dots
         let stripped_start = s.strip_prefix('.').unwrap_or(s);
         let stripped = stripped_start.strip_suffix('.').unwrap_or(stripped_start);
-
-        // split on dots
-        let pieces: Vec<&str> = if stripped.len() > 0 {
-            stripped.split(".").collect()
-        } else {
-            Vec::new()
-        };
-        if pieces.len() > MAX_SUB_IDENTIFIER_COUNT {
-            return Err(ObjectIdentifierConversionError::TooLong {
-                max: MAX_SUB_IDENTIFIER_COUNT,
-                obtained: pieces.len(),
-            });
+        if stripped.is_empty() {
+            return Ok(Self::default());
         }
 
+        // split on dots
+        let mut index = 0;
         let mut sub_identifiers = [0u32; MAX_SUB_IDENTIFIER_COUNT];
-        if stripped.len() > 0 {
-            for (index, piece) in pieces.iter().enumerate() {
-                sub_identifiers[index] = piece.parse()
-                    .map_err(|_| ObjectIdentifierConversionError::InvalidSubIdString {
-                        index,
-                    })?;
+        let mut pieces_iter = stripped.split('.');
+        for piece in &mut pieces_iter {
+            if index >= MAX_SUB_IDENTIFIER_COUNT {
+                let pieces_left = pieces_iter.count();
+                return Err(ObjectIdentifierConversionError::TooLong {
+                    max: MAX_SUB_IDENTIFIER_COUNT,
+                    obtained: index + 1 + pieces_left,
+                });
             }
+
+            sub_identifiers[index] = piece.parse()
+                .map_err(|_| ObjectIdentifierConversionError::InvalidSubIdString { index })?;
+            index += 1;
         }
 
         Ok(Self {
-            length: pieces.len(),
+            length: index,
             sub_identifiers,
         })
     }
@@ -403,17 +401,46 @@ mod tests {
     fn test_parse() {
         fn tfs(slice: &[u32], string: &str) {
             let parsed: ObjectIdentifier = string.parse().unwrap();
-            assert_eq!(parsed.as_slice(), slice);
+            assert_eq!(parsed.as_slice(), slice, "when parsing \"{string}\"");
         }
 
         tfs(&[], "");
+        tfs(&[], ".");
+        tfs(&[], "..");
         tfs(&[1], "1");
+        tfs(&[1], ".1.");
         tfs(&[1, 3, 6, 1, 4, 1], "1.3.6.1.4.1");
-        tfs(&[1, 3, 6, 1, 4, 1, 1], "1.3.6.1.4.1.1");
-        tfs(&[1, 3, 6, 1, 4, 1, 1, 2, 3, 4, 5], "1.3.6.1.4.1.1.2.3.4.5");
-        tfs(&[3, 2, 1], "3.2.1");
-        tfs(&[1, 3, 4], "1.3.4");
         tfs(&[1, 3, 4, 4294967295, 1], "1.3.4.4294967295.1");
+        let max_length = ".1".repeat(MAX_SUB_IDENTIFIER_COUNT);
+        tfs([1u32; MAX_SUB_IDENTIFIER_COUNT].as_slice(), &max_length);
+
+        use ObjectIdentifierConversionError as OICE;
+        fn tfs_err(err: OICE, string: &str) {
+            let parsed = string.parse::<ObjectIdentifier>();
+            assert_eq!(parsed, Err(err), "when parsing \"{string}\"");
+        }
+
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, "...");
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, "..1.");
+        tfs_err(OICE::InvalidSubIdString { index: 1 }, "1..2");
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, "4294967296");
+        tfs_err(OICE::InvalidSubIdString { index: 0 }, ".4294967296.");
+        let one_too_long = ".1".repeat(MAX_SUB_IDENTIFIER_COUNT + 1);
+        tfs_err(
+            OICE::TooLong {
+                max: MAX_SUB_IDENTIFIER_COUNT,
+                obtained: MAX_SUB_IDENTIFIER_COUNT + 1,
+            },
+            &one_too_long,
+        );
+        let way_too_long = ".1".repeat(MAX_SUB_IDENTIFIER_COUNT * 2);
+        tfs_err(
+            OICE::TooLong {
+                max: MAX_SUB_IDENTIFIER_COUNT,
+                obtained: MAX_SUB_IDENTIFIER_COUNT * 2,
+            },
+            &way_too_long,
+        );
     }
 
     #[test]
